@@ -1,15 +1,15 @@
 /* AirScan (a.k.a. IPP) backend for SANE
  *
- * Copyright (C) 2019 and up by Alexander Pevzner (pzz@apevzner.com)
- * See LICENSE for license terms and conditions
+ * 
+ * 
  *
- * ESCL protocol handler
+ * IPP protocol handler
  */
+
 #include "airscan.h"
 
 
-
-/* proto_handler_escl represents IPP protocol handler
+/* proto_handler_ipp represents IPP protocol handler
  */
 typedef struct {
     proto_handler proto; /* Base class */
