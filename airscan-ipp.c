@@ -1,8 +1,5 @@
 /* AirScan (a.k.a. IPP) backend for SANE
- *
- * 
- * 
- *
+
  * IPP protocol handler
  */
 
