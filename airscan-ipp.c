@@ -1,7 +1,10 @@
 /* AirScan (a.k.a. IPP) backend for SANE
-
- * IPP protocol handler
- */
+*
+*Copyright (C) 2019 and up by Alexander Pevzner (pzz@apevzner.com)
+* See LICENSE for license terms and conditions
+*
+* IPP protocol handler
+*/
 
 #include "airscan.h"
 #include <cups/cups.h>
@@ -122,6 +125,7 @@ proto_handler_ipp_new (void)
 }
 
 /*
+JUST FOR UNDERSTANDING TEMP
 1 -> Query/decode scanner capabilities (devcaps_query/devcaps_decode)
 2 -> Initiate scanning (create scan job) and decode result (scan_query/scan_decode)
 3 -> Initiate downloading of scanned image and decode result 
