@@ -2760,6 +2760,11 @@ proto_handler_escl_new (void);
 proto_handler*
 proto_handler_wsd_new (void);
 
+/* ipp_new proto_handler_wsd_new creates new IPP protocol handler
+ */
+proto_handler*
+proto_handler_ipp_new (void);
+
 /* proto_handler_new creates new protocol handler by protocol ID
  */
 static inline proto_handler*
