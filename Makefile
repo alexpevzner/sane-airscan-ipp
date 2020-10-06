@@ -51,6 +51,9 @@ deps_CFLAGS		+= $(foreach lib, $(DEPS_CODECS), $(shell $(PKG_CONFIG) --cflags $(
 deps_LIBS 		:= $(foreach lib, $(DEPS_COMMON), $(shell $(PKG_CONFIG) --libs $(lib))) -lm
 deps_LIBS_CODECS 	:= $(foreach lib, $(DEPS_CODECS), $(shell $(PKG_CONFIG) --libs $(lib)))
 
+# CUPS doesn't have pkg-config support and needs to be added manually
+deps_LIBS		+= -lcups
+
 # Compute CFLAGS and LDFLAGS for backend and tools
 #
 # Note, CFLAGS are common, for simplicity, while LDFLAGS are not, to
