@@ -32,11 +32,8 @@ ipp_http_post (const proto_ctx *ctx, void *body, size_t size)
 {
     http_query *q;
 
-    (void) body;
-    (void) size;
-
-    q = http_query_new(ctx->http, http_uri_clone(ctx->base_uri),
-        "POST", "", "application/ipp");
+    q = http_query_new_len(ctx->http, http_uri_clone(ctx->base_uri),
+        "POST", body, size, "application/ipp");
 
     return q;
 }
