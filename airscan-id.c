@@ -57,6 +57,7 @@ id_by_name (const char *name, int (*cmp) (const char *s1, const char *s2),
 static id_name_table id_proto_name_table[] = {
     {ID_PROTO_ESCL, "eSCL"},
     {ID_PROTO_WSD,  "WSD"},
+    {ID_PROTO_IPP,  "ipp"},
     {-1, NULL}
 };
 

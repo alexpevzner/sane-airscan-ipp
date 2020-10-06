@@ -623,6 +623,7 @@ typedef enum {
     ID_PROTO_UNKNOWN = -1,
     ID_PROTO_ESCL,
     ID_PROTO_WSD,
+    ID_PROTO_IPP,
 
     NUM_ID_PROTO
 } ID_PROTO;
@@ -2876,6 +2877,8 @@ proto_handler_new (ID_PROTO proto)
         return proto_handler_escl_new();
     case ID_PROTO_WSD:
         return proto_handler_wsd_new();
+    case ID_PROTO_IPP:
+        return proto_handler_ipp_new();
     default:
         return NULL;
     }

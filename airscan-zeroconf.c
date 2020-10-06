@@ -287,6 +287,10 @@ zeroconf_device_protocols (zeroconf_device *device)
         return 1 << ID_PROTO_WSD;
     }
 
+    if ((protocols & (1 << ID_PROTO_IPP)) != 0) {
+        return 1 << ID_PROTO_IPP;
+    }
+
     return 0;
 }
 
@@ -435,6 +439,7 @@ zeroconf_ident_proto_encode (ID_PROTO proto)
     switch (proto) {
     case ID_PROTO_ESCL: return 'e';
     case ID_PROTO_WSD:  return 'w';
+    case ID_PROTO_IPP:  return 'i';
 
     case ID_PROTO_UNKNOWN:
     case NUM_ID_PROTO:
@@ -453,6 +458,7 @@ zeroconf_ident_proto_decode (char c)
     switch (c) {
     case 'e': return ID_PROTO_ESCL;
     case 'w': return ID_PROTO_WSD;
+    case 'i': return ID_PROTO_IPP;
     }
 
     return ID_PROTO_UNKNOWN;
