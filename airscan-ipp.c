@@ -17,14 +17,6 @@ typedef struct {
     proto_handler proto; /* Base class */
 } proto_handler_ipp;
 
-/* Free IPP protocol handler
- */
-static void
-ipp_free (proto_handler *proto)
-{
-    mem_free(proto);
-}
-
 /* Create HTTP POST request
  */
 static http_query*
@@ -135,6 +127,14 @@ ipp_cancel_query (const proto_ctx *ctx)
     return ipp_http_post(ctx, NULL, 0);
 }
 
+/* Free IPP protocol handler
+ */
+static void
+ipp_free (proto_handler *proto)
+{
+    mem_free(proto);
+}
+
 /* proto_handler_ipp_new creates new IPP protocol handler
  */
 proto_handler*
@@ -172,3 +172,6 @@ JUST FOR UNDERSTANDING TEMP
 5 -> Cleanup after scan job (cleanup_query, there is no decode operation)
 6 -> Cancel scan job (cancel_query, and also no decode operation)
 */
+
+/* vim:ts=8:sw=4:et
+ */
