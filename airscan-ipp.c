@@ -6,6 +6,8 @@
 * IPP protocol handler
 */
 
+#define NO_HTTP_STATUS
+
 #include "airscan.h"
 #include <cups/cups.h>
 
@@ -23,77 +25,117 @@ ipp_free (proto_handler *proto)
     mem_free(proto);
 }
 
+/* Create HTTP POST request
+ */
+static http_query*
+ipp_http_post (const proto_ctx *ctx, void *body, size_t size)
+{
+    http_query *q;
+
+    (void) body;
+    (void) size;
+
+    q = http_query_new(ctx->http, http_uri_clone(ctx->base_uri),
+        "POST", "", "application/ipp");
+
+    return q;
+}
+
 /* Query device capabilities
  */
 static http_query*
 ipp_devcaps_query (const proto_ctx *ctx)
 {
-    SANE_Status status = SANE_STATUS_UNSUPPORTED;
-    return status;
+    return ipp_http_post(ctx, NULL, 0);
 }
+
 /* Decode device capabilities
  */
 static error
 ipp_devcaps_decode (const proto_ctx *ctx, devcaps *caps)
 {
-    SANE_Status status = SANE_STATUS_UNSUPPORTED;
-    return status;
+    (void) ctx;
+    (void) caps;
+    return ERROR("not supported");
 }
+
 /* Initiate scanning
  */
 static http_query*
 ipp_scan_query (const proto_ctx *ctx)
 {
-    SANE_Status status = SANE_STATUS_UNSUPPORTED;
-    return status;
+    return ipp_http_post(ctx, NULL, 0);
 }
 /* Decode result of scan request
  */
 static proto_result
 ipp_scan_decode (const proto_ctx *ctx)
 {
-    SANE_Status status = SANE_STATUS_UNSUPPORTED;
-    return status;
+    proto_result result = {0};
+
+    (void) ctx;
+
+    result.next = PROTO_OP_FINISH;
+    result.status = SANE_STATUS_UNSUPPORTED;
+    result.err = ERROR("not supported");
+
+    return result;
 }
+
 /* Initiate image downloading
  */
 static http_query*
 ipp_load_query (const proto_ctx *ctx)
 {
-    SANE_Status status = SANE_STATUS_UNSUPPORTED;
-    return status;
+    return ipp_http_post(ctx, NULL, 0);
 }
+
 /* Decode result of image request
  */
 static proto_result
 ipp_load_decode (const proto_ctx *ctx)
 {
-    SANE_Status status = SANE_STATUS_UNSUPPORTED;
-    return status;
+    proto_result result = {0};
+
+    (void) ctx;
+
+    result.next = PROTO_OP_FINISH;
+    result.status = SANE_STATUS_UNSUPPORTED;
+    result.err = ERROR("not supported");
+
+    return result;
 }
+
 /* Request device status
  */
 static http_query*
 ipp_status_query (const proto_ctx *ctx)
 {
-    SANE_Status status = SANE_STATUS_UNSUPPORTED;
-    return status;
+    return ipp_http_post(ctx, NULL, 0);
 }
+
 /* Decode result of device status request
  */
 static proto_result
 ipp_status_decode (const proto_ctx *ctx)
 {
-    SANE_Status status = SANE_STATUS_UNSUPPORTED;
-    return status;
+    proto_result result = {0};
+
+    (void) ctx;
+
+    result.next = PROTO_OP_FINISH;
+    result.status = SANE_STATUS_UNSUPPORTED;
+    result.err = ERROR("not supported");
+
+    return result;
 }
+
 /* Cancel scan in progress
  */
 static http_query*
 ipp_cancel_query (const proto_ctx *ctx)
 {
-    SANE_Status status = SANE_STATUS_UNSUPPORTED;
-    return status;
+    return ipp_http_post(ctx, NULL, 0);
 }
 
 /* proto_handler_ipp_new creates new IPP protocol handler
