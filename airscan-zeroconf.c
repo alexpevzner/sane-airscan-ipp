@@ -11,7 +11,6 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 
-#include <alloca.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -244,6 +243,19 @@ zeroconf_device_del_finding (zeroconf_finding *finding)
     zeroconf_device_update_model(device);
 }
 
+/* Get model name
+ */
+static const char*
+zeroconf_device_model (zeroconf_device *device)
+{
+    if (device->model != NULL) {
+        return device->model;
+    }
+
+    /* If model name is not available, fall back to UUID */
+    return device->uuid.text;
+}
+
 /* Get device name
  */
 static const char*
@@ -257,15 +269,7 @@ zeroconf_device_name (zeroconf_device *device)
         return device->buddy->mdns_name;
     }
 
-    return device->model;
-}
-
-/* Get model name
- */
-static const char*
-zeroconf_device_model (zeroconf_device *device)
-{
-    return device->model;
+    return zeroconf_device_model(device);
 }
 
 /* Get protocols, exposed by device
@@ -797,7 +801,8 @@ zeroconf_finding_publish (zeroconf_finding *finding)
     log_debug(zeroconf_log, "  interface: %d (%s)", finding->ifindex, ifname);
     log_debug(zeroconf_log, "  name:      %s",
         finding->name ? finding->name : "-");
-    log_debug(zeroconf_log, "  model:     %s", finding->model);
+    log_debug(zeroconf_log, "  model:     %s",
+        finding->model ? finding->model : "-");
 
     log_debug(zeroconf_log, "  addresses:");
     addrs = ip_addrset_addresses(finding->addrs, &count);
@@ -921,14 +926,14 @@ zeroconf_initscan_done (void)
             if (zeroconf_device_is_mdns(device) && device->buddy == NULL) {
                 log_debug(zeroconf_log,
                     "device_list wait: waiting for WSDD buddy for '%s' (%d)",
-                    device->mdns_name, device->devid);
+                    zeroconf_device_name(device), device->devid);
                 return false;
             }
         } else {
             if (device->protocols == 0) {
                 log_debug(zeroconf_log,
                     "device_list wait: waiting for any proto for '%s' (%d)",
-                    device->mdns_name, device->devid);
+                    zeroconf_device_name(device), device->devid);
                 return false;
             }
         }
@@ -1084,7 +1089,8 @@ zeroconf_device_list_get (void)
             if (device2 != NULL && zeroconf_device_protocols(device2) != 0) {
                 log_debug(zeroconf_log,
                     "%s (%d): skipping, shadowed by %s (%d)",
-                    name, device->devid, device2->mdns_name, device2->devid);
+                    name, device->devid,
+                    zeroconf_device_name(device2), device2->devid);
                 continue;
             }
         }

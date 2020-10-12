@@ -56,7 +56,8 @@ Legend:
 
 | Device                             | eSCL mode                 | WSD mode                  |
 | ---------------------------------- | :-----------------------: | :-----------------------: |
-| Brother DCP-L2550DW                | Yes                       |                           |
+| Brother DCP-L2540DW                | No                        | Yes                       |
+| Brother DCP-L2550DN / DCP-L2550DW  | Yes                       |                           |
 | Brother MFC-J485DW                 | Yes                       |                           |
 | Brother MFC-L2700DW                | No                        | Yes                       |
 | Brother MFC-L2710DW                | Yes                       | Yes                       |
@@ -129,6 +130,7 @@ Legend:
 | Kyocera ECOSYS M5526cdw            | Yes                       |                           |
 | Lexmark CX317dn                    | Yes<sup>[5](#note5)</sup> | Yes<sup>[5](#note5)</sup> |
 | Lexmark MC2535adwe                 | Yes                       |                           |
+| Lexmark MC3224adwe                 | Yes                       |                           |
 | Panasonic KV-S1058Y                | No                        | Yes                       |
 | Ricoh MP C3003                     | No                        | Yes<sup>[6](#note6)</sup> |
 | Samsung M267x 287x Series          | No                        | Yes                       |

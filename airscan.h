@@ -24,6 +24,7 @@
 #include <time.h>
 
 #include <netinet/in.h>
+#include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 
@@ -52,7 +53,11 @@
 /* Minimal interval between subsequent sane_start()
  * attempts, if previous sane_start was failed
  */
-#define CONFIG_START_RETRY_INTERVAL      2500
+#define CONFIG_START_RETRY_INTERVAL     2500
+
+/* Default directory for AF_UNIX sockets
+ */
+#define CONFIG_DEFAULT_SOCKET_DIR       "/var/run"
 
 /******************** Forward declarations ********************/
 /* log_ctx represents logging context
@@ -570,6 +575,22 @@ __ptr_array_del (void **a, int i)
 #define safe_tolower(c)         tolower((unsigned char) c)
 
 /******************** OS Facilities ********************/
+/* The following macros, if defined, indicate that OS
+ * has a particular features:
+ *
+ *   OS_HAVE_EVENTFD   - Linux-like eventfd (2)
+ *   OS_HAVE_RTNETLINK - Linux-like rtnetlink (7)
+ *   OS_HAVE_AF_ROUTE  - BSD-like AF_ROUTE
+ */
+#ifdef  __linux__
+#   define OS_HAVE_EVENTFD   1
+#   define OS_HAVE_RTNETLINK 1
+#endif
+
+#ifdef BSD
+#   define OS_HAVE_AF_ROUTE  1
+#endif
+
 /* Get user's home directory. There is no need to
  * free the returned string
  *
@@ -892,6 +913,7 @@ typedef struct {
     bool        model_is_netname; /* Use network name instead of model */
     bool        proto_auto;       /* Auto protocol selection */
     WSDD_MODE   wsdd_mode;        /* WS-Discovery mode */
+    const char  *socket_dir;      /* Directory for AF_UNIX sockets */
 } conf_data;
 
 #define CONF_INIT {                     \
@@ -901,7 +923,8 @@ typedef struct {
         .discovery = true,              \
         .model_is_netname = true,       \
         .proto_auto = true,             \
-        .wsdd_mode = WSDD_FAST          \
+        .wsdd_mode = WSDD_FAST,         \
+        .socket_dir = NULL              \
     }
 
 extern conf_data conf;
@@ -922,7 +945,8 @@ conf_unload (void);
  * be passed by value
  */
 typedef struct {
-    char       text[64];
+    /* Holds sun_path from sockaddr_un plus a null byte. */
+    char       text[109];
 } ip_straddr;
 
 /* Format ip_straddr from IP address (struct in_addr or struct in6_addr)
@@ -932,7 +956,7 @@ ip_straddr
 ip_straddr_from_ip (int af, const void *addr);
 
 /* Format ip_straddr from struct sockaddr.
- * Both AF_INET and AF_INET6 are supported
+ * AF_INET, AF_INET6, and AF_UNIX are supported
  *
  * If `withzone' is true, zone suffix will be appended, when appropriate
  */
@@ -940,7 +964,7 @@ ip_straddr
 ip_straddr_from_sockaddr(const struct sockaddr *addr, bool withzone);
 
 /* Format ip_straddr from struct sockaddr.
- * Both AF_INET and AF_INET6 are supported
+ * AF_INET, AF_INET6, and AF_UNIX are supported
  *
  * Port will not be appended, if it matches provided default port
  * If `withzone' is true, zone suffix will be appended, when appropriate
@@ -1854,7 +1878,8 @@ http_query_test_decode_response (http_query *q, const void *data, size_t size);
 typedef enum {
     HTTP_SCHEME_UNSET = -1,
     HTTP_SCHEME_HTTP,
-    HTTP_SCHEME_HTTPS
+    HTTP_SCHEME_HTTPS,
+    HTTP_SCHEME_UNIX
 } HTTP_SCHEME;
 
 /* Some HTTP status codes
@@ -2521,7 +2546,8 @@ typedef enum {
 typedef struct {
     ZEROCONF_METHOD   method;     /* Discovery method */
     const char        *name;      /* Network-unique name, NULL for WSD */
-    const char        *model;     /* Model name */
+    const char        *model;     /* Model name, may be NULL for
+                                     WSDD non-scanner devices */
     uuid              uuid;       /* Device UUID */
     ip_addrset        *addrs;     /* Device addresses */
     int               ifindex;    /* Network interface index */

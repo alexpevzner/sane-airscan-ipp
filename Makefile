@@ -48,7 +48,7 @@ OBJ	= $(addprefix $(OBJDIR), $(SRC:.c=.o))
 deps_CFLAGS		:= $(foreach lib, $(DEPS_COMMON), $(shell $(PKG_CONFIG) --cflags $(lib)))
 deps_CFLAGS		+= $(foreach lib, $(DEPS_CODECS), $(shell $(PKG_CONFIG) --cflags $(lib)))
 
-deps_LIBS 		:= $(foreach lib, $(DEPS_COMMON), $(shell $(PKG_CONFIG) --libs $(lib))) -lm
+deps_LIBS 		:= $(foreach lib, $(DEPS_COMMON), $(shell $(PKG_CONFIG) --libs $(lib))) -lm -lpthread
 deps_LIBS_CODECS 	:= $(foreach lib, $(DEPS_CODECS), $(shell $(PKG_CONFIG) --libs $(lib)))
 
 # CUPS doesn't have pkg-config support and needs to be added manually
@@ -63,7 +63,7 @@ common_CFLAGS 		+= -fPIC
 
 backend_LDFLAGS 	:= $(LDFLAGS)
 backend_LDFLAGS 	+= $(deps_LIBS) $(deps_LIBS_CODECS)
-backend_LDFLAGS 	+= -Wl,--version-script=airscan.sym
+backend_LDFLAGS 	+= -Wl,--version-script=airscan.sym -Wl,--no-undefined
 
 tools_LDFLAGS 		:= $(LDFLAGS)
 tools_LDFLAGS 		+= $(deps_LIBS)
@@ -95,13 +95,15 @@ install: all
 	mkdir -p $(DESTDIR)$(PREFIX)$(BINDIR)
 	mkdir -p $(DESTDIR)$(PREFIX)$(CONFDIR)
 	mkdir -p $(DESTDIR)$(PREFIX)$(CONFDIR)/dll.d
-	$(INSTALL) $(STRIP) -D -t $(DESTDIR)$(PREFIX)$(BINDIR) $(DISCOVER)
-	cp -n airscan.conf $(DESTDIR)$(PREFIX)$(CONFDIR)
-	cp -n dll.conf $(DESTDIR)$(PREFIX)$(CONFDIR)/dll.d/airscan
-	$(INSTALL) $(STRIP) -D -t $(DESTDIR)$(PREFIX)$(LIBDIR)/sane $(BACKEND)
+	$(INSTALL) $(STRIP) -D $(DISCOVER) $(DESTDIR)$(PREFIX)$(BINDIR)
+	[ -e $(DESTDIR)$(PREFIX)$(CONFDIR)/airscan.conf ] || cp airscan.conf $(DESTDIR)$(PREFIX)$(CONFDIR)
+	[ -e $(DESTDIR)$(PREFIX)$(CONFDIR)/dll.d/airscan ] || cp dll.conf $(DESTDIR)$(PREFIX)$(CONFDIR)/dll.d/airscan
+	mkdir -p $(DESTDIR)$(PREFIX)$(LIBDIR)/sane
+	$(INSTALL) $(STRIP) -D $(BACKEND) $(DESTDIR)$(PREFIX)$(LIBDIR)/sane
+	mkdir -p $(DESTDIR)$(PREFIX)/$(MANDIR)/man1
 	mkdir -p $(DESTDIR)$(PREFIX)/$(MANDIR)/man5
-	$(INSTALL) -m 644 -D -t $(DESTDIR)$(PREFIX)$(MANDIR)/man1 $(MAN_DISCOVER)
-	$(INSTALL) -m 644 -D -t $(DESTDIR)$(PREFIX)$(MANDIR)/man5 $(MAN_BACKEND)
+	$(INSTALL) -m 644 $(MAN_DISCOVER) $(DESTDIR)$(PREFIX)$(MANDIR)/man1
+	$(INSTALL) -m 644 $(MAN_BACKEND) $(DESTDIR)$(PREFIX)$(MANDIR)/man5
 	[ "$(COMPRESS)" = "" ] || $(COMPRESS) -f $(DESTDIR)$(PREFIX)$(MANDIR)/man1/$(MAN_DISCOVER)
 	[ "$(COMPRESS)" = "" ] || $(COMPRESS) -f $(DESTDIR)$(PREFIX)$(MANDIR)/man5/$(MAN_BACKEND)
 
