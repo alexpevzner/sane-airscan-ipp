@@ -46,25 +46,20 @@ typedef struct {
 
 /* Name of the process' executable
  */
-static char program[PATH_MAX];
+static const char *trace_program;
 
 /* Full block of zero bytes
  */
-static const char zero_block[512];
+static const char trace_zero_block[512];
 
 /* Initialize protocol trace. Called at backend initialization
  */
 SANE_Status
 trace_init (void)
 {
-    ssize_t rc = readlink("/proc/self/exe", program, sizeof(program));
-    if (rc < 0) {
-        strcpy(program, "unknown");
-    } else {
-        char *s = strrchr(program, '/');
-        if (s != NULL) {
-            memmove(program, s+1, strlen(s+1) + 1);
-        }
+    trace_program = os_progname();
+    if (trace_program == NULL) {
+        trace_program = "unknown";
     }
 
     return SANE_STATUS_GOOD;
@@ -83,27 +78,25 @@ trace*
 trace_open (const char *device_name)
 {
     trace  *t;
-    char   path[PATH_MAX];
+    char   *path;
     size_t len;
 
     if (conf.dbg_trace == NULL) {
         return NULL;
     }
 
-    os_mkdir(conf.dbg_trace, 0755);
+    (void) os_mkdir(conf.dbg_trace, 0755);
     t = mem_new(trace, 1);
     t->refcnt = 1;
 
-    strcpy(path, conf.dbg_trace);
-    len = strlen(path);
-    if (len != 0 && path[len - 1] != '/') {
-        path[len ++] = '/';
-        path[len] = '\0';
-    }
+    path = str_dup(conf.dbg_trace);
+    path = str_terminate(path, '/');
 
-    strcat(path, program);
-    strcat(path, "-");
-    strcat(path, device_name);
+    len = strlen(path);
+
+    path = str_append(path, trace_program);
+    path = str_append(path, "-");
+    path = str_append(path, device_name);
 
     for (; path[len] != '\0'; len ++) {
         switch (path[len]) {
@@ -114,11 +107,14 @@ trace_open (const char *device_name)
         }
     }
 
-    strcpy(path + len, ".log");
+    path = str_append(path, ".log");
     t->log = fopen(path, "w");
 
-    strcpy(path + len, ".tar");
+    path = str_resize(path, str_len(path) - 4);
+    path = str_append(path, ".tar");
     t->data = fopen(path, "wb");
+
+    mem_free(path);
 
     if (t->log != NULL && t->data != NULL) {
         return t;
@@ -151,8 +147,8 @@ trace_unref (trace *t)
         if (t->data != NULL) {
             if (t->log != NULL) {
                 /* Normal close - write tar footer */
-                fwrite(zero_block, sizeof(zero_block), 1, t->data);
-                fwrite(zero_block, sizeof(zero_block), 1, t->data);
+                fwrite(trace_zero_block, sizeof(trace_zero_block), 1, t->data);
+                fwrite(trace_zero_block, sizeof(trace_zero_block), 1, t->data);
             }
             fclose(t->data);
         }
@@ -230,7 +226,7 @@ trace_dump_data (trace *t, http_data *data)
     /* Write padding */
     i = data->size & (512-1);
     if (i != 0) {
-        fwrite(zero_block, 512 - i, 1, t->data);
+        fwrite(trace_zero_block, 512 - i, 1, t->data);
     }
 
     /* Put a note into the log file */
@@ -286,6 +282,61 @@ trace_dump_body (trace *t, http_data *data)
     }
 
     putc('\n', t->log);
+}
+
+/* Dump binary data (as hex dump)
+ * Each line is prefixed with the `prefix` character
+ */
+void
+trace_hexdump (trace *t, char prefix, const void *data, size_t size)
+{
+    const uint8_t *dp = data;
+    unsigned int  off = 0;
+    char          *buf;
+
+    if (t == NULL || !conf.dbg_hexdump) {
+        return;
+    }
+
+    buf = str_new();
+    while (size != 0) {
+        size_t       av = size > 16 ? 16 : size;
+        unsigned int i;
+
+        str_trunc(buf);
+        buf = str_append_printf(buf, "%c %4.4x: ", prefix, off);
+
+        for(i = 0; i < 16; i ++) {
+            buf = str_append_printf(buf, i < av ? "%2.2x" : "  ", dp[ i ]);
+
+            switch(i) {
+            case 3: case 11:
+                buf = str_append_c(buf, i < av ? ':' : ' ');
+                break;
+            case 7:
+                buf = str_append_c(buf, i < av ? '-' : ' ');
+                break;
+            default:
+                buf = str_append_c(buf, ' ');
+            }
+        }
+
+        buf = str_append(buf,  "  ");
+        for( i = 0; i < av; i ++ )
+        {
+            unsigned char c = dp[ i ];
+            buf = str_append_c(buf, safe_isprint( c ) ? c : '.' );
+        }
+
+        buf = str_append_c(buf, '\n');
+        fwrite(buf, str_len(buf), 1, t->log);
+
+        off += av;
+        dp += av;
+        size -= av;
+    }
+
+    mem_free(buf);
 }
 
 /* This hook is called on every http_query completion

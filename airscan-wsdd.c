@@ -18,6 +18,11 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <net/if.h>
+
+#ifdef BSD
+#   include <net/if_dl.h>
+#endif
+
 #include <sys/socket.h>
 
 /* Protocol times, in milliseconds
@@ -122,34 +127,34 @@ static ip_addrset          *wsdd_addrs_probing;
  */
 static const char *wsdd_probe_template =
     "<?xml version=\"1.0\"?>"
-    "<s:Envelope xmlns:a=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\" xmlns:d=\"http://schemas.xmlsoap.org/ws/2005/04/discovery\" xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:wsdp=\"http://schemas.xmlsoap.org/ws/2006/02/devprof\">"
-    "<s:Header>"
-      "<a:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</a:Action>"
-      "<a:MessageID>%s</a:MessageID>"
-      "<a:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</a:To>"
-    "</s:Header>"
-    "<s:Body>"
-      "<d:Probe>"
-        "<d:Types>wsdp:Device</d:Types>"
-      "</d:Probe>"
-    "</s:Body>"
-    "</s:Envelope>";
+    "<soap:Envelope xmlns:wsa=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\" xmlns:wsd=\"http://schemas.xmlsoap.org/ws/2005/04/discovery\" xmlns:soap=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:wsdp=\"http://schemas.xmlsoap.org/ws/2006/02/devprof\">"
+    "<soap:Header>"
+      "<wsa:Action>http://schemas.xmlsoap.org/ws/2005/04/discovery/Probe</wsa:Action>"
+      "<wsa:MessageID>%s</wsa:MessageID>"
+      "<wsa:To>urn:schemas-xmlsoap-org:ws:2005:04:discovery</wsa:To>"
+    "</soap:Header>"
+    "<soap:Body>"
+      "<wsd:Probe>"
+        "<wsd:Types>wsdp:Device</wsd:Types>"
+      "</wsd:Probe>"
+    "</soap:Body>"
+    "</soap:Envelope>";
 
 /* WS-DD Get (metadata) template
  */
 static const char *wsdd_get_metadata_template =
     "<?xml version=\"1.0\"?>"
-    "<s:Envelope xmlns:a=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\" xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\">"
-      "<s:Header>"
-        "<a:Action>http://schemas.xmlsoap.org/ws/2004/09/transfer/Get</a:Action>"
-        "<a:MessageID>%s</a:MessageID>"
-        "<a:To>%s</a:To>"
-        "<a:ReplyTo>"
-          "<a:Address>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</a:Address>"
-        "</a:ReplyTo>"
-      "</s:Header>"
-      "<s:Body/>"
-    "</s:Envelope>";
+    "<soap:Envelope xmlns:wsa=\"http://schemas.xmlsoap.org/ws/2004/08/addressing\" xmlns:soap=\"http://www.w3.org/2003/05/soap-envelope\">"
+      "<soap:Header>"
+        "<wsa:Action>http://schemas.xmlsoap.org/ws/2004/09/transfer/Get</wsa:Action>"
+        "<wsa:MessageID>%s</wsa:MessageID>"
+        "<wsa:To>%s</wsa:To>"
+        "<wsa:ReplyTo>"
+          "<wsa:Address>http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous</wsa:Address>"
+        "</wsa:ReplyTo>"
+      "</soap:Header>"
+      "<soap:Body/>"
+    "</soap:Envelope>";
 
 /* XML namespace translation
  */
@@ -492,8 +497,8 @@ wsdd_finding_list_purge (void)
 /* Parse endpoint addresses from the devprof:Hosted section of the
  * device metadata:
  *   <devprof:Hosted>
- *     <a:EndpointReference>
- *       <a:Address>http://192.168.1.102:5358/WSDScanner</a:Address>
+ *     <wsa:EndpointReference>
+ *       <wsa:Address>http://192.168.1.102:5358/WSDScanner</wsa:Address>
  *     </addressing:EndpointReference>
  *     <devprof:Types>scan:ScannerServiceType</devprof:Types>
  *     <devprof:ServiceId>uri:4509a320-00a0-008f-00b6-002507510eca/WSDScanner</devprof:ServiceId>
@@ -807,6 +812,50 @@ wsdd_message_action_name (const wsdd_message *msg)
     return "UNKNOWN";
 }
 
+/******************** Advanced socket options ********************/
+/* Setup IP_PKTINFO/IP_RECVIF reception for IPv6 sockets
+ */
+static int
+wsdd_sock_enable_pktinfo_ip6 (int fd)
+{
+    static int yes = 1;
+    int        rc;
+
+    rc = setsockopt(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &yes, sizeof(yes));
+    if (rc < 0) {
+        log_debug(wsdd_log, "setsockopt(AF_INET6, IPV6_RECVPKTINFO): %s",
+                strerror(errno));
+    }
+
+    return rc;
+}
+
+/* Setup IP_PKTINFO/IP_RECVIF reception for IPv4 sockets
+ */
+static int
+wsdd_sock_enable_pktinfo_ip4 (int fd)
+{
+    static int yes = 1;
+    int        rc;
+
+#ifdef IP_PKTINFO
+    /* Linux version */
+    rc = setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &yes, sizeof(yes));
+#elif defined(IP_RECVIF)
+    /* OpenBSD */
+    rc = setsockopt(fd, IPPROTO_IP, IP_RECVIF, &yes, sizeof(yes));
+#else
+#  error FIX ME
+#endif
+
+    if (rc < 0) {
+        log_debug(wsdd_log, "setsockopt(AF_INET,IP_PKTINFO/IP_RECVIF): %s",
+                  strerror(errno));
+    }
+
+    return rc;
+}
+
 /******************** wsdd_resolver operations ********************/
 /* Dispatch received WSDD message
  */
@@ -940,15 +989,28 @@ wsdd_resolver_read_callback (int fd, void *data, ELOOP_FDPOLL_MASK mask)
             cmsg->cmsg_type == IPV6_PKTINFO) {
             struct in6_pktinfo *pkt = (struct in6_pktinfo*) CMSG_DATA(cmsg);
             ifindex = pkt->ipi6_ifindex;
-        } else if (cmsg->cmsg_level == IPPROTO_IP &&
+        }
+#ifdef IP_PKTINFO
+        /* Linux version */
+        else if (cmsg->cmsg_level == IPPROTO_IP &&
             cmsg->cmsg_type == IP_PKTINFO) {
             struct in_pktinfo *pkt = (struct in_pktinfo*) CMSG_DATA(cmsg);
             ifindex = pkt->ipi_ifindex;
         }
+#elif defined(IP_RECVIF)
+        /* OpenBSD */
+        else if (cmsg->cmsg_level == IPPROTO_IP &&
+            cmsg->cmsg_type == IP_RECVIF) {
+            struct sockaddr_dl *pkt = (struct sockaddr_dl *) CMSG_DATA(cmsg);
+            ifindex = pkt->sdl_index;
+        }
+#else
+#   error FIX ME
+#endif
     }
 
     str_from = ip_straddr_from_sockaddr((struct sockaddr*) &from, true);
-    getsockname(fd, (struct sockaddr*) &to, &tolen);
+    (void) getsockname(fd, (struct sockaddr*) &to, &tolen);
     str_to = ip_straddr_from_sockaddr((struct sockaddr*) &to, true);
 
     log_trace(wsdd_log, "%d bytes received: %s->%s", rc,
@@ -1055,7 +1117,7 @@ wsdd_resolver_new (const netif_addr *addr, bool initscan)
     int           af = addr->ipv6 ? AF_INET6 : AF_INET;
     const char    *af_name = addr->ipv6 ? "AF_INET6" : "AF_INET";
     int           rc;
-    static int    no = 0, yes = 1;
+    static int    no = 0;
     uint16_t      port;
 
     /* Build resolver structure */
@@ -1080,17 +1142,13 @@ wsdd_resolver_new (const netif_addr *addr, bool initscan)
             goto FAIL;
         }
 
-        rc = setsockopt(resolver->fd, IPPROTO_IPV6, IPV6_RECVPKTINFO,
-                &yes, sizeof(yes));
-
+        rc = wsdd_sock_enable_pktinfo_ip6(resolver->fd);
         if (rc < 0) {
-            log_debug(wsdd_log, "setsockopt(IPPROTO_IPV6,IPV6_RECVPKTINFO): %s",
-                    strerror(errno));
             goto FAIL;
         }
 
         /* Note: error is not a problem here */
-        setsockopt(resolver->fd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP,
+        (void) setsockopt(resolver->fd, IPPROTO_IPV6, IPV6_MULTICAST_LOOP,
                 &no, sizeof(no));
     } else {
         rc = setsockopt(resolver->fd, IPPROTO_IP, IP_MULTICAST_IF,
@@ -1102,17 +1160,14 @@ wsdd_resolver_new (const netif_addr *addr, bool initscan)
             goto FAIL;
         }
 
-        rc = setsockopt(resolver->fd, IPPROTO_IP, IP_PKTINFO,
-                &yes, sizeof(yes));
 
+        rc = wsdd_sock_enable_pktinfo_ip4(resolver->fd);
         if (rc < 0) {
-            log_debug(wsdd_log, "setsockopt(AF_INET,IP_PKTINFO): %s",
-                    strerror(errno));
             goto FAIL;
         }
 
         /* Note: error is not a problem here */
-        setsockopt(resolver->fd, IPPROTO_IP, IP_MULTICAST_LOOP,
+        (void) setsockopt(resolver->fd, IPPROTO_IP, IP_MULTICAST_LOOP,
                 &no, sizeof(no));
     }
 
@@ -1129,7 +1184,7 @@ wsdd_resolver_new (const netif_addr *addr, bool initscan)
 
         rc = bind(resolver->fd, (struct sockaddr*) &a, sizeof(a));
 
-        getsockname(resolver->fd, (struct sockaddr*) &a, &alen);
+        (void) getsockname(resolver->fd, (struct sockaddr*) &a, &alen);
         port = a.sin6_port;
         resolver->str_sockaddr = ip_straddr_from_sockaddr(
                 (struct sockaddr*) &a, true);
@@ -1146,7 +1201,7 @@ wsdd_resolver_new (const netif_addr *addr, bool initscan)
 
         rc = bind(resolver->fd, (struct sockaddr*) &a, sizeof(a));
 
-        getsockname(resolver->fd, (struct sockaddr*) &a, &alen);
+        (void) getsockname(resolver->fd, (struct sockaddr*) &a, &alen);
         port = a.sin_port;
         resolver->str_sockaddr = ip_straddr_from_sockaddr(
                 (struct sockaddr*) &a, true);
@@ -1397,17 +1452,13 @@ wsdd_mcsock_open (bool ipv6)
             goto FAIL;
         }
 
-        rc = setsockopt(fd, IPPROTO_IPV6, IPV6_RECVPKTINFO, &yes, sizeof(yes));
+        rc = wsdd_sock_enable_pktinfo_ip6(fd);
         if (rc < 0) {
-            log_debug(wsdd_log, "setsockopt(%s, IPV6_RECVPKTINFO): %s",
-                    af_name, strerror(errno));
             goto FAIL;
         }
     } else {
-        rc = setsockopt(fd, IPPROTO_IP, IP_PKTINFO, &yes, sizeof(yes));
+        rc = wsdd_sock_enable_pktinfo_ip4(fd);
         if (rc < 0) {
-            log_debug(wsdd_log, "setsockopt(%s, IP_PKTINFO): %s",
-                    af_name, strerror(errno));
             goto FAIL;
         }
     }
@@ -1462,7 +1513,7 @@ wsdd_mcast_update_membership (int fd, netif_addr *addr, bool add)
 	mreq6.ipv6mr_multiaddr = wsdd_mcast_ipv6.sin6_addr;
 	mreq6.ipv6mr_interface = addr->ifindex;
 
-        opt = add ? IPV6_ADD_MEMBERSHIP : IPV6_DROP_MEMBERSHIP;
+        opt = add ? IPV6_JOIN_GROUP : IPV6_LEAVE_GROUP;
         rc = setsockopt(fd, IPPROTO_IPV6, opt, &mreq6, sizeof(mreq6));
 
         if (rc < 0) {
@@ -1471,12 +1522,20 @@ wsdd_mcast_update_membership (int fd, netif_addr *addr, bool add)
                     strerror(errno));
         }
     } else {
+#ifdef OS_HAVE_IP_MREQN
         struct ip_mreqn  mreq4;
+#else
+        struct ip_mreq  mreq4;
+#endif
 
         memset(&mreq4, 0, sizeof(mreq4));
         mreq4.imr_multiaddr = wsdd_mcast_ipv4.sin_addr;
+#ifdef OS_HAVE_IP_MREQN
         mreq4.imr_address = addr->ip.v4;
         mreq4.imr_ifindex = addr->ifindex;
+#else
+        mreq4.imr_interface = addr->ip.v4;
+#endif
 
         opt = add ? IP_ADD_MEMBERSHIP : IP_DROP_MEMBERSHIP;
         rc = setsockopt(fd, IPPROTO_IP, opt, &mreq4, sizeof(mreq4));
@@ -1495,9 +1554,9 @@ wsdd_mcast_update_membership (int fd, netif_addr *addr, bool add)
 static void
 wsdd_netif_dump_addresses (const char *prefix, netif_addr *list)
 {
-    char suffix[32] = "";
-
     while (list != NULL) {
+        char suffix[32] = "";
+
         if (list->ipv6 && ip_is_linklocal(AF_INET6, &list->ip)) {
             sprintf(suffix, "%%%d", list->ifindex);
         }

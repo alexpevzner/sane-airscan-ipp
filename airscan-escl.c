@@ -49,6 +49,11 @@
  */
 typedef struct {
     proto_handler proto; /* Base class */
+
+    /* Miscellaneous flags */
+    bool quirk_localhost;            /* Set Host: localhost in ScanJobs rq */
+    bool quirk_canon_mf410_series;   /* Canon MF410 Series */
+    bool quirk_port_in_host;         /* Always set port in Host: header */
 } proto_handler_escl;
 
 /* XML namespace for XML writer
@@ -59,6 +64,21 @@ static const xml_ns escl_xml_wr_ns[] = {
     {NULL, NULL}
 };
 
+
+/******************** Miscellaneous types ********************/
+/* escl_scanner_status represents decoded ScannerStatus response
+ */
+typedef struct {
+    SANE_Status device_status; /* <pwg:State>XXX</pwg:State> */
+    SANE_Status adf_status;    /* <scan:AdfState>YYY</scan:AdfState> */
+} escl_scanner_status;
+
+
+/******************** Forward declarations ********************/
+static error
+escl_parse_scanner_status (const proto_ctx *ctx,
+        const char *xml_text, size_t xml_len, escl_scanner_status *out);
+
 /******************** HTTP utility functions ********************/
 /* Create HTTP query
  */
@@ -66,8 +86,13 @@ static http_query*
 escl_http_query (const proto_ctx *ctx, const char *path,
         const char *method, char *body)
 {
-    return http_query_new_relative(ctx->http, ctx->base_uri, path,
+    proto_handler_escl *escl = (proto_handler_escl*) ctx->proto;
+    http_query *query = http_query_new_relative(ctx->http, ctx->base_uri, path,
         method, body, "text/xml");
+    if (escl->quirk_port_in_host) {
+        http_query_force_port(query, true);
+    }
+    return query;
 }
 
 /* Create HTTP get query
@@ -100,11 +125,6 @@ escl_devcaps_source_parse_color_modes (xml_rd *xml, devcaps_source *src)
         }
     }
     xml_rd_leave(xml);
-
-    src->colormodes &= DEVCAPS_COLORMODES_SUPPORTED;
-    if (src->colormodes == 0) {
-        return ERROR("no color modes detected");
-    }
 
     return NULL;
 }
@@ -269,10 +289,6 @@ escl_devcaps_source_parse_resolutions (xml_rd *xml, devcaps_source *src)
         src->flags &= ~DEVCAPS_SOURCE_RES_RANGE;
     }
 
-    if (!(src->flags & (DEVCAPS_SOURCE_RES_DISCRETE|DEVCAPS_SOURCE_RES_RANGE))){
-        err = ERROR("scan resolutions are not defined");
-    }
-
     return err;
 }
 
@@ -283,6 +299,7 @@ escl_devcaps_source_parse_setting_profiles (xml_rd *xml, devcaps_source *src)
 {
     error err = NULL;
 
+    /* Parse setting profiles */
     xml_rd_enter(xml);
     for (; err == NULL && !xml_rd_end(xml); xml_rd_next(xml)) {
         if (xml_rd_node_name_match(xml, "scan:SettingProfile")) {
@@ -303,9 +320,61 @@ escl_devcaps_source_parse_setting_profiles (xml_rd *xml, devcaps_source *src)
     }
     xml_rd_leave(xml);
 
+    /* Validate results */
+    if (err == NULL) {
+        src->colormodes &= DEVCAPS_COLORMODES_SUPPORTED;
+        if (src->colormodes == 0) {
+            return ERROR("no color modes detected");
+        }
+
+        src->formats &= DEVCAPS_FORMATS_SUPPORTED;
+        if (src->formats == 0) {
+            return ERROR("no image formats detected");
+        }
+
+        if (!(src->flags & (DEVCAPS_SOURCE_RES_DISCRETE|
+                            DEVCAPS_SOURCE_RES_RANGE))){
+            return ERROR("scan resolutions are not defined");
+        }
+    }
+
     return err;
 }
 
+
+/* Parse ADF justification
+ */
+static void
+escl_devcaps_parse_justification (xml_rd *xml,
+        ID_JUSTIFICATION *x, ID_JUSTIFICATION *y)
+{
+    xml_rd_enter(xml);
+
+    *x = *y = ID_JUSTIFICATION_UNKNOWN;
+
+    for (; !xml_rd_end(xml); xml_rd_next(xml)) {
+        if(xml_rd_node_name_match(xml, "pwg:XImagePosition")){
+            const char *v = xml_rd_node_value(xml);
+            if (!strcmp(v, "Right")){
+                *x = ID_JUSTIFICATION_RIGHT;
+            } else if (!strcmp(v, "Center")) {
+                *x = ID_JUSTIFICATION_CENTER;
+            } else if (!strcmp(v, "Left")) {
+                *x = ID_JUSTIFICATION_LEFT;
+            }
+        } else if(xml_rd_node_name_match(xml, "pwg:YImagePosition")){
+            const char *v = xml_rd_node_value(xml);
+            if (!strcmp(v, "Top")){
+                *y = ID_JUSTIFICATION_TOP;
+            } else if (!strcmp(v, "Center")) {
+                *y = ID_JUSTIFICATION_CENTER;
+            } else if (!strcmp(v, "Bottom")) {
+                *y = ID_JUSTIFICATION_BOTTOM;
+            }
+        }
+    }
+    xml_rd_leave(xml);
+}
 
 /* Parse source capabilities. Returns NULL on success, error string otherwise
  */
@@ -418,11 +487,14 @@ escl_devcaps_compression_parse (xml_rd *xml, devcaps *caps)
  * before calling this function.
  */
 static error
-escl_devcaps_parse (devcaps *caps, const char *xml_text, size_t xml_len)
+escl_devcaps_parse (proto_handler_escl *escl,
+        devcaps *caps, const char *xml_text, size_t xml_len)
 {
-    error  err = NULL;
-    xml_rd *xml;
-    bool   quirk_canon_iR2625_2630 = false;
+    error     err = NULL;
+    xml_rd    *xml;
+    bool      quirk_canon_iR2625_2630 = false;
+    ID_SOURCE id_src;
+    bool      src_ok = false;
 
     /* Parse capabilities XML */
     err = xml_rd_begin(&xml, xml_text, xml_len, NULL);
@@ -442,6 +514,20 @@ escl_devcaps_parse (devcaps *caps, const char *xml_text, size_t xml_len)
 
             if (!strcmp(m, "Canon iR2625/2630")) {
                 quirk_canon_iR2625_2630 = true;
+            } else if (!strcmp(m, "HP LaserJet MFP M630")) {
+                escl->quirk_localhost = true;
+            } else if (!strcmp(m, "HP Color LaserJet FlowMFP M578")) {
+                escl->quirk_localhost = true;
+            } else if (!strcmp(m, "MF410 Series")) {
+                escl->quirk_canon_mf410_series = true;
+            } else if (!strncasecmp(m, "EPSON ", 6)) {
+                escl->quirk_port_in_host = true;
+            }
+        } else if (xml_rd_node_name_match(xml, "scan:Manufacturer")) {
+            const char *m = xml_rd_node_value(xml);
+
+            if (!strcasecmp(m, "EPSON")) {
+                escl->quirk_port_in_host = true;
             }
         } else if (xml_rd_node_name_match(xml, "scan:Platen")) {
             xml_rd_enter(xml);
@@ -461,6 +547,10 @@ escl_devcaps_parse (devcaps *caps, const char *xml_text, size_t xml_len)
                     err = escl_devcaps_source_parse(xml,
                         &caps->src[ID_SOURCE_ADF_DUPLEX]);
                 }
+                else if (xml_rd_node_name_match(xml, "scan:Justification")) {
+                    escl_devcaps_parse_justification(xml,
+                        &caps->justification_x, &caps->justification_y);
+                }
                 xml_rd_next(xml);
             }
             xml_rd_leave(xml);
@@ -476,9 +566,6 @@ escl_devcaps_parse (devcaps *caps, const char *xml_text, size_t xml_len)
     }
 
     /* Check that we have at least one source */
-    ID_SOURCE id_src;
-    bool      src_ok = false;
-
     for (id_src = (ID_SOURCE) 0; id_src < NUM_ID_SOURCE; id_src ++) {
         if (caps->src[id_src] != NULL) {
             src_ok = true;
@@ -533,12 +620,84 @@ escl_devcaps_query (const proto_ctx *ctx)
 static error
 escl_devcaps_decode (const proto_ctx *ctx, devcaps *caps)
 {
-    http_data *data = http_query_get_response_data(ctx->query);
+    proto_handler_escl *escl = (proto_handler_escl*) ctx->proto;
+    http_data          *data = http_query_get_response_data(ctx->query);
+    const char         *s;
 
     caps->units = 300;
     caps->protocol = ctx->proto->name;
+    caps->justification_x = caps->justification_y = ID_JUSTIFICATION_UNKNOWN;
 
-    return escl_devcaps_parse(caps, data->bytes, data->size);
+    /* Most of devices that have Server: HP_Compact_Server
+     * in their HTTP response header, require this quirk
+     * (see #116)
+     */
+    s = http_query_get_response_header(ctx->query, "server");
+    if (s != NULL && !strcmp(s, "HP_Compact_Server")) {
+        escl->quirk_localhost = true;
+    }
+
+    return escl_devcaps_parse(escl, caps, data->bytes, data->size);
+}
+
+/* Create pre-scan check query
+ */
+static http_query*
+escl_precheck_query (const proto_ctx *ctx)
+{
+    return escl_http_get(ctx, "ScannerStatus");
+}
+
+/* Decode pre-scan check query results
+ */
+static proto_result
+escl_precheck_decode (const proto_ctx *ctx)
+{
+    proto_handler_escl  *escl = (proto_handler_escl*) ctx->proto;
+    proto_result        result = {0};
+    error               err = NULL;
+    escl_scanner_status sts;
+    bool                adf = ctx->params.src == ID_SOURCE_ADF_SIMPLEX ||
+                              ctx->params.src == ID_SOURCE_ADF_DUPLEX;
+
+    /* Initialize result to something optimistic :-) */
+    result.status = SANE_STATUS_GOOD;
+    result.next = PROTO_OP_SCAN;
+
+    /* Decode status */
+    err = http_query_error(ctx->query);
+    if (err == NULL) {
+        http_data *data = http_query_get_response_data(ctx->query);
+        err = escl_parse_scanner_status(ctx, data->bytes, data->size, &sts);
+    }
+
+    if (err != NULL) {
+        result.err = err;
+        result.status = SANE_STATUS_IO_ERROR;
+        result.next = PROTO_OP_FINISH;
+        return result;
+    }
+
+    /* Note, the pre-check status is not always reliable, so normally
+     * we ignore it. Hoverer, with Canon MF410 Series attempt to
+     * scan from empty ADF causes ADF jam error (really, physical!),
+     * so we must take care
+     */
+    if (escl->quirk_canon_mf410_series) {
+        if (adf) {
+            switch (sts.adf_status) {
+            case SANE_STATUS_JAMMED:
+            case SANE_STATUS_NO_DOCS:
+                result.status = sts.adf_status;
+                result.next = PROTO_OP_FINISH;
+
+            default:
+                break;
+            }
+        }
+    }
+
+    return result;
 }
 
 /* Fix Location: URL
@@ -557,6 +716,7 @@ escl_scan_fix_location (void *p, http_uri *uri, const http_uri *orig_uri)
 static http_query*
 escl_scan_query (const proto_ctx *ctx)
 {
+    proto_handler_escl      *escl = (proto_handler_escl*) ctx->proto;
     const proto_scan_params *params = &ctx->params;
     const char              *source = NULL;
     const char              *colormode = NULL;
@@ -621,19 +781,33 @@ escl_scan_query (const proto_ctx *ctx)
     query = escl_http_query(ctx, "ScanJobs", "POST",
         xml_wr_finish_compact(xml));
 
+    /* Kyocera ECOSYS M6526cdn drops TLS connection after sending
+     * response HTTP headers, but before the body transfer is completed.
+     *
+     * As for this request we are only interested in the response
+     * headers, we can ignore this kind of error
+     *
+     * See here for details:
+     *   https://github.com/alexpevzner/sane-airscan/issues/163
+     */
+    http_query_no_need_response_body(query);
+
     /* It's a dirty hack
      *
-     * HP LaserJet MFP M630 doesn't allow eSCL scan, unless
-     * Host is set to "localhost". It is probably bad and
-     * naive attempt to enforce some access security.
+     * HP LaserJet MFP M630, HP Color LaserJet FlowMFP M578 and
+     * probably some other HP devices don't allow eSCL scan, unless
+     * Host is set to "localhost". It is probably bad and naive attempt
+     * to enforce some access security.
      *
-     * So here we forcibly set Host to "localhost". I hope
-     * it will not cause problems with other devices. BTW,
-     * vuescan does the same, and I believe they have tested
-     * many devices.
+     * So here we forcibly set Host to "localhost".
+     *
+     * Note, this hack doesn't work with some other printers
+     * see #92, #98 for details
      */
-    http_query_set_request_header(query, "Host", "localhost");
-    http_query_onredir(query, escl_scan_fix_location);
+    if (escl->quirk_localhost) {
+        http_query_set_request_header(query, "Host", "localhost");
+        http_query_onredir(query, escl_scan_fix_location);
+    }
 
     return query;
 }
@@ -755,15 +929,15 @@ escl_status_query (const proto_ctx *ctx)
  *
  * Returned SANE_STATUS_UNSUPPORTED means status not understood
  */
-static SANE_Status
-escl_decode_scanner_status (const proto_ctx *ctx,
-        const char *xml_text, size_t xml_len)
+static error
+escl_parse_scanner_status (const proto_ctx *ctx,
+        const char *xml_text, size_t xml_len, escl_scanner_status *out)
 {
-    error       err = NULL;
-    xml_rd      *xml;
-    SANE_Status device_status = SANE_STATUS_UNSUPPORTED;
-    SANE_Status adf_status = SANE_STATUS_UNSUPPORTED;
-    SANE_Status status = SANE_STATUS_IO_ERROR;
+    error               err = NULL;
+    xml_rd              *xml;
+    const char          *opname = proto_op_name(ctx->op);
+    escl_scanner_status sts = {SANE_STATUS_UNSUPPORTED,
+            SANE_STATUS_UNSUPPORTED};
 
     /* Decode XML */
     err = xml_rd_begin(&xml, xml_text, xml_len, NULL);
@@ -781,59 +955,79 @@ escl_decode_scanner_status (const proto_ctx *ctx,
         if (xml_rd_node_name_match(xml, "pwg:State")) {
             const char *state = xml_rd_node_value(xml);
             if (!strcmp(state, "Idle")) {
-                device_status = SANE_STATUS_GOOD;
+                sts.device_status = SANE_STATUS_GOOD;
             } else if (!strcmp(state, "Processing")) {
-                device_status = SANE_STATUS_DEVICE_BUSY;
+                sts.device_status = SANE_STATUS_DEVICE_BUSY;
             } else if (!strcmp(state, "Testing")) {
                 /* HP LaserJet MFP M630 warm up */
-                device_status = SANE_STATUS_DEVICE_BUSY;
+                sts.device_status = SANE_STATUS_DEVICE_BUSY;
             } else {
-                device_status = SANE_STATUS_UNSUPPORTED;
+                sts.device_status = SANE_STATUS_UNSUPPORTED;
             }
         } else if (xml_rd_node_name_match(xml, "scan:AdfState")) {
             const char *state = xml_rd_node_value(xml);
             if (!strcmp(state, "ScannerAdfLoaded")) {
-                adf_status = SANE_STATUS_GOOD;
+                sts.adf_status = SANE_STATUS_GOOD;
             } else if (!strcmp(state, "ScannerAdfJam")) {
-                adf_status = SANE_STATUS_JAMMED;
+                sts.adf_status = SANE_STATUS_JAMMED;
             } else if (!strcmp(state, "ScannerAdfDoorOpen")) {
-                adf_status = SANE_STATUS_COVER_OPEN;
+                sts.adf_status = SANE_STATUS_COVER_OPEN;
             } else if (!strcmp(state, "ScannerAdfProcessing")) {
                 /* Kyocera version */
-                adf_status = SANE_STATUS_NO_DOCS;
+                sts.adf_status = SANE_STATUS_NO_DOCS;
             } else if (!strcmp(state, "ScannerAdfEmpty")) {
                 /* Cannon TR4500, EPSON XP-7100 */
-                adf_status = SANE_STATUS_NO_DOCS;
+                sts.adf_status = SANE_STATUS_NO_DOCS;
             } else {
-                adf_status = SANE_STATUS_UNSUPPORTED;
+                sts.adf_status = SANE_STATUS_UNSUPPORTED;
             }
         }
-    }
-
-    /* Decode Job status */
-    if (ctx->params.src != ID_SOURCE_PLATEN &&
-        adf_status != SANE_STATUS_GOOD &&
-        adf_status != SANE_STATUS_UNSUPPORTED) {
-        status = adf_status;
-    } else {
-        status = device_status;
     }
 
 DONE:
     xml_rd_finish(&xml);
 
-    trace_printf(log_ctx_trace(ctx->log), "-----");
     if (err != NULL) {
-        trace_printf(log_ctx_trace(ctx->log), "Error: %s", ESTRING(err));
+        log_debug(ctx->log, "%s: %s", opname, ESTRING(err));
     } else {
-        trace_printf(log_ctx_trace(ctx->log), "Device status: %s",
-            sane_strstatus(device_status));
-        trace_printf(log_ctx_trace(ctx->log), "ADF status: %s",
-            sane_strstatus(adf_status));
-        trace_printf(log_ctx_trace(ctx->log), "Job status: %s",
-            sane_strstatus(status));
-        trace_printf(log_ctx_trace(ctx->log), "");
+        log_debug(ctx->log, "%s: device status: %s",
+            opname, sane_strstatus(sts.device_status));
+        log_debug(ctx->log, "%s: ADF status: %s",
+            opname, sane_strstatus(sts.adf_status));
     }
+
+    *out = sts;
+    return err;
+}
+
+/* Parse ScannerStatus response.
+ *
+ * Returned SANE_STATUS_UNSUPPORTED means status not understood
+ */
+static SANE_Status
+escl_decode_scanner_status (const proto_ctx *ctx,
+        const char *xml_text, size_t xml_len)
+{
+    escl_scanner_status sts;
+    error               err;
+    SANE_Status         status;
+    const char          *opname = proto_op_name(ctx->op);
+
+    err = escl_parse_scanner_status(ctx, xml_text, xml_len, &sts);
+    if (err != NULL) {
+        return SANE_STATUS_IO_ERROR;
+    }
+
+    /* Decode Job status */
+    if (ctx->params.src != ID_SOURCE_PLATEN &&
+        sts.adf_status != SANE_STATUS_GOOD &&
+        sts.adf_status != SANE_STATUS_UNSUPPORTED) {
+        status = sts.adf_status;
+    } else {
+        status = sts.device_status;
+    }
+
+    log_debug(ctx->log, "%s: job status: %s", opname, sane_strstatus(status));
 
     return status;
 }
@@ -962,6 +1156,9 @@ proto_handler_escl_new (void)
 
     escl->proto.devcaps_query = escl_devcaps_query;
     escl->proto.devcaps_decode = escl_devcaps_decode;
+
+    escl->proto.precheck_query = escl_precheck_query;
+    escl->proto.precheck_decode = escl_precheck_decode;
 
     escl->proto.scan_query = escl_scan_query;
     escl->proto.scan_decode = escl_scan_decode;

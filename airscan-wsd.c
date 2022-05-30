@@ -6,11 +6,17 @@
  * ESCL protocol handler
  */
 
+#define _GNU_SOURCE
+#include <string.h>
+
 #include "airscan.h"
 
 #include <stdlib.h>
 
 /* Protocol constants */
+
+/* Miscellaneous strings, used by protocol
+ */
 #define WSD_ADDR_ANONYMOUS              \
         "http://schemas.xmlsoap.org/ws/2004/08/addressing/role/anonymous"
 
@@ -25,6 +31,18 @@
 
 #define WSD_ACTION_CANCEL_JOB           \
         "http://schemas.microsoft.com/windows/2006/08/wdp/scan/CancelJob"
+
+/* Retry parameters
+ *
+ * If CreateScanJobRequest is failed due to temporary reason (Calibrating,
+ * LampWarming), request is retries several times
+ *
+ * WSD_CREATE_SCAN_JOB_RETRY_PAUSE defines pause between retries,
+ * in milliseconds. WSD_CREATE_SCAN_JOB_RETRY_ATTEMPTS defines
+ * an attempt limit
+ */
+#define WSD_CREATE_SCAN_JOB_RETRY_PAUSE         1000
+#define WSD_CREATE_SCAN_JOB_RETRY_ATTEMPTS      30
 
 /* XML namespace translation for XML reader
  */
@@ -51,6 +69,9 @@ static const xml_ns wsd_ns_wr[] = {
 typedef struct {
     proto_handler proto; /* Base class */
 
+    /* Error reasons decoding */
+    char          fault_code[64];
+
     /* Supported formats: JPEG variants */
     bool          exif;
     bool          jfif;
@@ -66,6 +87,10 @@ typedef struct {
     bool          png;
     bool          dib;
 } proto_handler_wsd;
+
+/* Forward declarations */
+static http_query*
+wsd_status_query (const proto_ctx *ctx);
 
 /* Free WSD protocol handler
  */
@@ -553,10 +578,56 @@ wsd_devcaps_decode (const proto_ctx *ctx, devcaps *caps)
 
     caps->units = 1000;
     caps->protocol = ctx->proto->name;
+    caps->justification_x = caps->justification_y = ID_JUSTIFICATION_UNKNOWN;
 
     err = wsd_devcaps_parse(wsd, caps, data->bytes, data->size);
 
     return err;
+}
+
+/* Check if response is fault response without decoding it
+ */
+static bool
+wsd_fault_check (const proto_ctx *ctx)
+{
+    http_data         *data;
+    static const char fault[] =
+        "//schemas.xmlsoap.org/ws/2004/08/addressing/fault";
+
+    /* If we have erroneous HTTP status, we expect to see fault message
+     * inside
+     */
+    if (http_query_error(ctx->query) != NULL) {
+        return true;
+    }
+
+    /* Some devices (namely Lexmark MB2236adw and Xerox WorkCentre 3225)
+     * may use HTTP status 200 to return fault response, so check for
+     * the HTTP status code is not enough to distinguish between normal
+     * and fault response
+     *
+     * So we search the response body for the following string:
+     *     "//schemas.xmlsoap.org/ws/2004/08/addressing/fault"
+     *
+     * If this string is found, this is probably a fault response
+     *
+     * Note, the scheme is stripped from this string, because some
+     * devices use "http://", why another may use "https://"
+     *
+     * Note, as optimization and to avoid searching this string
+     * across the image date, we assume that if we have got MIME
+     * multipart response, it is probably not fault.
+     */
+    if (http_query_get_mp_response_count(ctx->query) != 0) {
+        return false;
+    }
+
+    data = http_query_get_response_data(ctx->query);
+    if (memmem(data->bytes, data->size, fault, sizeof(fault) - 1) != NULL) {
+        return true;
+    }
+
+    return false;
 }
 
 /* Decode fault response
@@ -564,21 +635,20 @@ wsd_devcaps_decode (const proto_ctx *ctx, devcaps *caps)
 static proto_result
 wsd_fault_decode (const proto_ctx *ctx)
 {
-    proto_result result = {0};
-    http_data    *data = http_query_get_response_data(ctx->query);
-    xml_rd       *xml;
-
-    /* Initialize result */
-    result.next = PROTO_OP_CHECK;
-    result.status = SANE_STATUS_IO_ERROR;
+    proto_handler_wsd *wsd = (proto_handler_wsd*) ctx->proto;
+    proto_result      result = {0};
+    http_data         *data = http_query_get_response_data(ctx->query);
+    xml_rd            *xml;
 
     /* Parse XML */
     result.err = xml_rd_begin(&xml, data->bytes, data->size, wsd_ns_rd);
     if (result.err != NULL) {
+        result.next = PROTO_OP_FINISH;
+        result.status = SANE_STATUS_IO_ERROR;
         return result;
     }
 
-    /* Decode XML */
+    /* Decode XML, save fault code */
     while (!xml_rd_end(xml)) {
         const char *path = xml_rd_node_path(xml);
 
@@ -592,27 +662,39 @@ wsd_fault_decode (const proto_ctx *ctx)
                 fault = s + 1;
             }
 
-            /* Decode the status */
+            /* Save the status */
             log_debug(ctx->log, "fault code: %s", fault);
-
-            if (!strcmp(fault, "ServerErrorNotAcceptingJobs")) {
-                result.status = SANE_STATUS_DEVICE_BUSY;
-            } else if (!strcmp(fault, "ClientErrorNoImagesAvailable")) {
-                switch (ctx->params.src) {
-                    case ID_SOURCE_ADF_SIMPLEX:
-                    case ID_SOURCE_ADF_DUPLEX:
-                        result.status = SANE_STATUS_NO_DOCS;
-                        break;
-                    default:
-                        break;
-                }
-            }
+            strncpy(wsd->fault_code, fault, sizeof(wsd->fault_code) - 1);
         }
 
         xml_rd_deep_next(xml, 0);
     }
 
     xml_rd_finish(&xml);
+
+    result.next = PROTO_OP_CHECK;
+    return result;
+}
+
+/* Create pre-scan check query
+ */
+static http_query*
+wsd_precheck_query (const proto_ctx *ctx)
+{
+    return wsd_status_query(ctx);
+}
+
+/* Decode pre-scan check query results
+ */
+static proto_result
+wsd_precheck_decode (const proto_ctx *ctx)
+{
+    proto_result result = {0};
+
+    (void) ctx;
+
+    result.next = PROTO_OP_SCAN;
+    result.status = SANE_STATUS_GOOD;
 
     return result;
 }
@@ -780,7 +862,7 @@ wsd_scan_decode (const proto_ctx *ctx)
     result.next = PROTO_OP_FINISH;
 
     /* Decode error, if any */
-    if (http_query_error(ctx->query) != NULL) {
+    if (wsd_fault_check(ctx)) {
         return wsd_fault_decode(ctx);
     }
 
@@ -878,7 +960,7 @@ wsd_load_decode (const proto_ctx *ctx)
     http_data    *data;
 
     /* Check HTTP status */
-    if (http_query_error(ctx->query) != NULL) {
+    if (wsd_fault_check(ctx)) {
         return wsd_fault_decode(ctx);
     }
 
@@ -926,11 +1008,117 @@ wsd_status_query (const proto_ctx *ctx)
 static proto_result
 wsd_status_decode (const proto_ctx *ctx)
 {
-    proto_result result = {0};
+    proto_handler_wsd *wsd = (proto_handler_wsd*) ctx->proto;
+    proto_result      result = {0};
+    http_data         *data = http_query_get_response_data(ctx->query);
+    xml_rd            *xml;
+    char              scanner_state[64] = {0};
+    bool              adf = ctx->params.src == ID_SOURCE_ADF_SIMPLEX ||
+                            ctx->params.src == ID_SOURCE_ADF_DUPLEX;
+    bool              retry = false;
 
+    log_debug(ctx->log, "PROTO_OP_CHECK: fault code: %s", wsd->fault_code);
+
+    /* Initialize result */
     result.next = PROTO_OP_FINISH;
+    result.status = SANE_STATUS_GOOD;
 
-    (void) ctx;
+    /* Look to the saved fault code. It it is specific enough, return
+     * error immediately
+     */
+    if (adf) {
+        if (!strcmp(wsd->fault_code, "ClientErrorNoImagesAvailable")) {
+            result.status = SANE_STATUS_NO_DOCS;
+            return result;
+        }
+    }
+
+    /* Parse XML */
+    result.err = xml_rd_begin(&xml, data->bytes, data->size, wsd_ns_rd);
+    if (result.err != NULL) {
+        return result;
+    }
+
+    /* Roll over parsed XML, until fault reason is known */
+    while (!xml_rd_end(xml) && result.status == SANE_STATUS_GOOD && !retry) {
+        const char *path = xml_rd_node_path(xml);
+        const char *val;
+
+        if (!strcmp(path, "s:Envelope/s:Body/scan:GetScannerElementsResponse/"
+                "scan:ScannerElements/scan:ElementData/scan:ScannerStatus/"
+                "scan:ScannerState")) {
+
+            val = xml_rd_node_value(xml);
+            log_debug(ctx->log, "PROTO_OP_CHECK: ScannerState: %s", val);
+            strncpy(scanner_state, val, sizeof(scanner_state) - 1);
+        } else if (!strcmp(path, "s:Envelope/s:Body/scan:GetScannerElementsResponse/"
+                "scan:ScannerElements/scan:ElementData/scan:ScannerStatus/"
+                "scan:ScannerStateReasons/scan:ScannerStateReason")) {
+
+            val = xml_rd_node_value(xml);
+            log_debug(ctx->log, "PROTO_OP_CHECK: ScannerStateReason: %s", val);
+
+            if (!strcmp(val, "AttentionRequired")) {
+                result.status = SANE_STATUS_DEVICE_BUSY;
+            } else if (!strcmp(val, "Calibrating")) {
+                retry = true;
+            } else if (!strcmp(val, "CoverOpen")) {
+                result.status = SANE_STATUS_COVER_OPEN;
+            } else if (!strcmp(val, "InterlockOpen")) {
+                // Note, I have no idea what is interlock, but
+                // let's assume it's a kind of cover...
+                result.status = SANE_STATUS_COVER_OPEN;
+            } else if (!strcmp(val, "InternalStorageFull")) {
+                result.status = SANE_STATUS_NO_MEM;
+            } else if (!strcmp(val, "LampError")) {
+                result.status = SANE_STATUS_IO_ERROR;
+            } else if (!strcmp(val, "LampWarming")) {
+                retry = true;
+            } else if (!strcmp(val, "MediaJam")) {
+                result.status = SANE_STATUS_JAMMED;
+            } else if (!strcmp(val, "MultipleFeedError")) {
+                result.status = SANE_STATUS_JAMMED;
+            }
+        }
+
+        xml_rd_deep_next(xml, 0);
+    }
+
+    xml_rd_finish(&xml);
+
+    /* Retry? */
+    if (retry && ctx->failed_attempt < WSD_CREATE_SCAN_JOB_RETRY_ATTEMPTS) {
+        result.next = PROTO_OP_SCAN;
+        result.delay = WSD_CREATE_SCAN_JOB_RETRY_PAUSE;
+        return result;
+    }
+
+    /* Reason was found? */
+    if (result.status != SANE_STATUS_GOOD) {
+        return result;
+    }
+
+    /* ServerErrorNotAcceptingJobs? */
+    if (!strcmp(wsd->fault_code, "ServerErrorNotAcceptingJobs")) {
+        /* Assume device not accepted jobs because require some
+         * manual action/reconfiguration. For example, Kyocera
+         * in the WSD mode scans only WSD scan is requested from
+         * the front panel, otherwise it returns this kind
+         * of error
+         */
+        result.status = SANE_STATUS_DEVICE_BUSY;
+
+        /* Canon MF410 Series reports ADF empty this way */
+        if (adf && !strcmp(scanner_state, "Idle")) {
+            result.status = SANE_STATUS_NO_DOCS;
+        }
+    }
+
+    /* Still no idea? */
+    if (result.status == SANE_STATUS_GOOD) {
+        result.status = SANE_STATUS_IO_ERROR;
+    }
+
     return result;
 }
 
@@ -974,6 +1162,9 @@ proto_handler_wsd_new (void)
 
     wsd->proto.devcaps_query = wsd_devcaps_query;
     wsd->proto.devcaps_decode = wsd_devcaps_decode;
+
+    wsd->proto.precheck_query = wsd_precheck_query;
+    wsd->proto.precheck_decode = wsd_precheck_decode;
 
     wsd->proto.scan_query = wsd_scan_query;
     wsd->proto.scan_decode = wsd_scan_decode;

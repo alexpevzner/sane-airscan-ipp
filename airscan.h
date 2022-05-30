@@ -28,6 +28,10 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 
+#ifdef  __cplusplus
+extern "C" {
+#endif
+
 /******************** Static configuration ********************/
 /* Configuration path in environment
  */
@@ -35,7 +39,9 @@
 
 /* Standard SANE configuration directory
  */
-#define CONFIG_SANE_CONFIG_DIR          "/etc/sane.d/"
+#ifndef CONFIG_SANE_CONFIG_DIR
+#    define CONFIG_SANE_CONFIG_DIR      "/etc/sane.d/"
+#endif
 
 /* Sane-airscan configuration file and subdirectory names
  */
@@ -279,7 +285,8 @@ ll_cat (ll_head *list1, ll_head *list2)
  * This function never returns NULL, it panics in a case of
  * memory allocation error.
  */
-#define mem_resize(p,len,extra) __mem_resize(p,len,extra,sizeof(*p),true)
+#define mem_resize(p,len,extra)         \
+        ((__typeof__(p)) __mem_resize(p,len,extra,sizeof(*p),true))
 
 /* Try to resize memory. It works like mem_resize() but may
  * return NULL if memory allocation failed.
@@ -345,6 +352,14 @@ str_dup (const char *s1)
     return s;
 }
 
+/* Get string length in bytes, not including terminating '\0'
+ */
+static inline size_t
+str_len (const char *s)
+{
+    return mem_len(s);
+}
+
 /* Create new string as a lowercase copy of existent string
  */
 char*
@@ -391,7 +406,7 @@ str_resize (char *s, size_t len)
 static inline char*
 str_append_mem (char *s1, const char *s2, size_t l2)
 {
-    size_t l1 = mem_len(s1);
+    size_t l1 = str_len(s1);
 
     s1 = mem_resize(s1, l1 + l2, 1);
     memcpy(s1 + l1, s2, l2);
@@ -465,7 +480,7 @@ str_concat (const char *s, ...);
 static inline char*
 str_terminate (char *s, char c)
 {
-    if (s[0] != '\0' && s[mem_len(s) - 1] != c) {
+    if (s[0] != '\0' && s[str_len(s) - 1] != c) {
         s = str_append_c(s, c);
     }
 
@@ -571,6 +586,8 @@ __ptr_array_del (void **a, int i)
 /******************** Safe ctype macros ********************/
 #define safe_isspace(c)         isspace((unsigned char) c)
 #define safe_isxdigit(c)        isxdigit((unsigned char) c)
+#define safe_iscntrl(c)         iscntrl((unsigned char) c)
+#define safe_isprint(c)         isprint((unsigned char) c)
 #define safe_toupper(c)         toupper((unsigned char) c)
 #define safe_tolower(c)         tolower((unsigned char) c)
 
@@ -578,17 +595,29 @@ __ptr_array_del (void **a, int i)
 /* The following macros, if defined, indicate that OS
  * has a particular features:
  *
- *   OS_HAVE_EVENTFD   - Linux-like eventfd (2)
- *   OS_HAVE_RTNETLINK - Linux-like rtnetlink (7)
- *   OS_HAVE_AF_ROUTE  - BSD-like AF_ROUTE
+ *   OS_HAVE_EVENTFD      - Linux-like eventfd (2)
+ *   OS_HAVE_RTNETLINK    - Linux-like rtnetlink (7)
+ *   OS_HAVE_AF_ROUTE     - BSD-like AF_ROUTE
+ *   OS_HAVE_LINUX_PROCFS - Linux-style procfs
+ *   OS_HAVE_IP_MREQN     - OS defines struct ip_mreqn
+ *   OS_HAVE_ENDIAN_H     - #include <endian.h> works
+ *   OS_HAVE_SYS_ENDIAN_H - #include <sys/endian.h> works
  */
 #ifdef  __linux__
-#   define OS_HAVE_EVENTFD   1
-#   define OS_HAVE_RTNETLINK 1
+#   define OS_HAVE_EVENTFD              1
+#   define OS_HAVE_RTNETLINK            1
+#   define OS_HAVE_LINUX_PROCFS         1
+#   define OS_HAVE_IP_MREQN             1
+#   define OS_HAVE_ENDIAN_H             1
 #endif
 
 #ifdef BSD
-#   define OS_HAVE_AF_ROUTE  1
+#   define OS_HAVE_AF_ROUTE             1
+#   ifdef __FreeBSD__
+#       define OS_HAVE_SYS_ENDIAN_H     1
+#   else
+#       define OS_HAVE_ENDIAN_H         1
+#   endif
 #endif
 
 /* Get user's home directory. There is no need to
@@ -598,6 +627,14 @@ __ptr_array_del (void **a, int i)
  */
 const char *
 os_homedir (void);
+
+/* Get base name of the calling program.
+ * There is no need to free the returned string
+ *
+ * May return NULL in a case of error
+ */
+const char*
+os_progname (void);
 
 /* Make directory with parents
  */
@@ -615,7 +652,7 @@ os_mkdir (const char *path, mode_t mode);
  * by error or string, obtained from an error using the
  * ESTRING() function
  */
-typedef struct {} *error;
+typedef struct error_s *error;
 
 /* Standard errors
  */
@@ -683,6 +720,28 @@ id_source_sane_name (ID_SOURCE id);
  */
 ID_SOURCE
 id_source_by_sane_name (const char *name);
+
+/* ID_JUSTIFICATION represents hardware-defined ADF justification
+ * This value exposed to the SANE API as a couple of read-only
+ * options, separate for width and height justification.
+ * Not all scanners provide this information
+ */
+typedef enum {
+    ID_JUSTIFICATION_UNKNOWN = -1,
+    ID_JUSTIFICATION_LEFT,
+    ID_JUSTIFICATION_CENTER,
+    ID_JUSTIFICATION_RIGHT,
+    ID_JUSTIFICATION_TOP,
+    ID_JUSTIFICATION_BOTTOM,
+
+    NUM_ID_JUSTIFICATION
+} ID_JUSTIFICATION;
+
+/* id_justification_sane_name returns SANE name for the width justification
+ * For unknown ID returns NULL
+ */
+const char*
+id_justification_sane_name (ID_JUSTIFICATION id);
 
 /* ID_COLORMODE represents color mode
  */
@@ -879,67 +938,6 @@ inifile_read (inifile *file);
 bool
 inifile_match_name (const char *n1, const char *n2);
 
-/******************** Configuration file loader ********************/
-/* Device URI for manually disabled device
- */
-#define CONF_DEVICE_DISABLE     "disable"
-
-/* Device configuration, for manually added devices
- */
-typedef struct conf_device conf_device;
-struct conf_device {
-    unsigned int devid; /* Device ident */
-    const char   *name; /* Device name */
-    ID_PROTO     proto; /* Protocol to use */
-    http_uri     *uri;  /* Device URI, parsed; NULL if device disabled */
-    conf_device  *next; /* Next device in the list */
-};
-
-/* WSDD_MODE represents WS-Discovery mode
- */
-typedef enum {
-    WSDD_FAST,  /* Use hints from DNS-SD to speed up WSDD */
-    WSDD_FULL,  /* Full discovery, slow and fair */
-    WSDD_OFF    /* Disable WSDD */
-} WSDD_MODE;
-
-/* Backend configuration
- */
-typedef struct {
-    bool        dbg_enabled;      /* Debugging enabled */
-    const char  *dbg_trace;       /* Trace directory */
-    conf_device *devices;         /* Manually configured devices */
-    bool        discovery;        /* Scanners discovery enabled */
-    bool        model_is_netname; /* Use network name instead of model */
-    bool        proto_auto;       /* Auto protocol selection */
-    WSDD_MODE   wsdd_mode;        /* WS-Discovery mode */
-    const char  *socket_dir;      /* Directory for AF_UNIX sockets */
-} conf_data;
-
-#define CONF_INIT {                     \
-        .dbg_enabled = false,           \
-        .dbg_trace = NULL,              \
-        .devices = NULL,                \
-        .discovery = true,              \
-        .model_is_netname = true,       \
-        .proto_auto = true,             \
-        .wsdd_mode = WSDD_FAST,         \
-        .socket_dir = NULL              \
-    }
-
-extern conf_data conf;
-
-/* Load configuration. It updates content of a global conf variable
- */
-void
-conf_load (void);
-
-/* Free resources, allocated by conf_load, and reset configuration
- * data into initial state
- */
-void
-conf_unload (void);
-
 /******************** Utility functions for IP addresses ********************/
 /* Address string, wrapped into structure so can
  * be passed by value
@@ -1078,6 +1076,23 @@ ip_addr_equal (ip_addr a1, ip_addr a2)
     return false;
 }
 
+/* ip_network represents IPv4 or IPv6 network (i.e., address with mask)
+ */
+typedef struct {
+    ip_addr addr; /* Network address */
+    int     mask; /* Network mask */
+} ip_network;
+
+/* Format ip_network into ip_straddr
+ */
+ip_straddr
+ip_network_to_straddr (ip_network net);
+
+/* Check if ip_network contains ip_addr
+ */
+bool
+ip_network_contains (ip_network net, ip_addr addr);
+
 /* ip_addr_set represents a set of IP addresses
  */
 typedef struct ip_addrset ip_addrset;
@@ -1133,6 +1148,20 @@ ip_addrset_addresses (const ip_addrset *addrset, size_t *count);
  */
 bool
 ip_addrset_is_intersect (const ip_addrset *set, const ip_addrset *set2);
+
+/* Check if some of addresses in the address set is on the
+ * given network
+ */
+bool
+ip_addrset_on_network (const ip_addrset *set, ip_network net);
+
+/* Create user-friendly string out of set of addresses, containing
+ * in the ip_addrset:
+ *   * addresses are sorted, IP4 addresses goes first
+ *   * link-local addresses are skipped, if there are non-link-local ones
+ */
+char*
+ip_addrset_friendly_str (const ip_addrset *set, char *s);
 
 /******************** Network interfaces addresses ********************/
 /* Network interface name, wrapped into structure, so
@@ -1260,6 +1289,80 @@ netif_init (void);
  */
 void
 netif_cleanup (void);
+
+/******************** Configuration file loader ********************/
+/* Device URI for manually disabled device
+ */
+#define CONF_DEVICE_DISABLE     "disable"
+
+/* Device configuration, for manually added devices
+ */
+typedef struct conf_device conf_device;
+struct conf_device {
+    unsigned int devid; /* Device ident */
+    const char   *name; /* Device name */
+    ID_PROTO     proto; /* Protocol to use */
+    http_uri     *uri;  /* Device URI, parsed; NULL if device disabled */
+    conf_device  *next; /* Next device in the list */
+};
+
+/* WSDD_MODE represents WS-Discovery mode
+ */
+typedef enum {
+    WSDD_FAST,  /* Use hints from DNS-SD to speed up WSDD */
+    WSDD_FULL,  /* Full discovery, slow and fair */
+    WSDD_OFF    /* Disable WSDD */
+} WSDD_MODE;
+
+/* Device blacklist entry
+ */
+typedef struct conf_blacklist conf_blacklist;
+struct conf_blacklist {
+    const char     *model;   /* If not NULL, match by model */
+    const char     *name;    /* If not NULL, match by network name */
+    ip_network     net;      /* if net.addr.af != AF_UNSPEC, match by net */
+    conf_blacklist *next;    /* Next entry in the list */
+};
+
+/* Backend configuration
+ */
+typedef struct {
+    bool           dbg_enabled;      /* Debugging enabled */
+    const char     *dbg_trace;       /* Trace directory */
+    bool           dbg_hexdump;      /* Hexdump all traffic to the trace */
+    conf_device    *devices;         /* Manually configured devices */
+    bool           discovery;        /* Scanners discovery enabled */
+    bool           model_is_netname; /* Use network name instead of model */
+    bool           proto_auto;       /* Auto protocol selection */
+    WSDD_MODE      wsdd_mode;        /* WS-Discovery mode */
+    const char     *socket_dir;      /* Directory for AF_UNIX sockets */
+    conf_blacklist *blacklist;       /* Devices blacklisted for discovery */
+} conf_data;
+
+#define CONF_INIT {                     \
+        .dbg_enabled = false,           \
+        .dbg_trace = NULL,              \
+        .dbg_hexdump = false,           \
+        .devices = NULL,                \
+        .discovery = true,              \
+        .model_is_netname = true,       \
+        .proto_auto = true,             \
+        .wsdd_mode = WSDD_FAST,         \
+        .socket_dir = NULL              \
+    }
+
+extern conf_data conf;
+
+/* Load configuration. It updates content of a global conf variable
+ */
+void
+conf_load (void);
+
+/* Free resources, allocated by conf_load, and reset configuration
+ * data into initial state
+ */
+void
+conf_unload (void);
 
 /******************** Pollable events ********************/
 /* The pollable event
@@ -1440,6 +1543,11 @@ typedef enum {
     ELOOP_FDPOLL_BOTH  = ELOOP_FDPOLL_READ | ELOOP_FDPOLL_WRITE
 } ELOOP_FDPOLL_MASK;
 
+/* Convert ELOOP_FDPOLL_MASK to string. Used for logging.
+ */
+const char*
+eloop_fdpoll_mask_str (ELOOP_FDPOLL_MASK mask);
+
 /* Create eloop_fdpoll
  *
  * Callback will be called, when file will be ready for read/write/both,
@@ -1457,9 +1565,9 @@ eloop_fdpoll_new (int fd,
 void
 eloop_fdpoll_free (eloop_fdpoll *fdpoll);
 
-/* Set eloop_fdpoll event mask
+/* Set eloop_fdpoll event mask. It returns a previous value of event mask
  */
-void
+ELOOP_FDPOLL_MASK
 eloop_fdpoll_set_mask (eloop_fdpoll *fdpoll, ELOOP_FDPOLL_MASK mask);
 
 /* Format error string, as printf() does and save result
@@ -1524,6 +1632,9 @@ http_uri_af (http_uri *uri)
 }
 
 /* Get URI path
+ *
+ * Note, if URL has empty path (i.e., "http://1.2.3.4"), the
+ * empty string will be returned
  */
 const char*
 http_uri_get_path (const http_uri *uri);
@@ -1532,6 +1643,19 @@ http_uri_get_path (const http_uri *uri);
  */
 void
 http_uri_set_path (http_uri *uri, const char *path);
+
+/* Get URI host. It returns only host name, port number is
+ * not included.
+ *
+ * IPv6 literal addresses are returned in square brackets
+ * (i.e., [fe80::217:c8ff:fe7b:6a91%4])
+ *
+ * Note, the subsequent modifications of URI, such as http_uri_fix_host(),
+ * http_uri_fix_ipv6_zone() etc, may make the returned string invalid,
+ * so if you need to keep it for a long time, better make a copy
+ */
+const char*
+http_uri_get_host (const http_uri *uri);
 
 /* Fix URI host: if `match` is NULL or uri's host matches `match`,
  * replace uri's host and port with values taken from the base_uri
@@ -1703,6 +1827,25 @@ http_query_new_relative(http_client *client,
  */
 void
 http_query_timeout (http_query *q, int timeout);
+
+/* Set 'no_need_response_body' flag
+ *
+ * This flag notifies, that http_query issued is only interested
+ * in the HTTP response headers, not body
+ *
+ * If this flag is set, after successful reception of response
+ * HTTP header, errors in fetching response body is ignored
+ */
+void
+http_query_no_need_response_body (http_query *q);
+
+/* Set forcing port to be added to the Host header for this query.
+ *
+ * This function may be called multiple times (each subsequent call overrides
+ * a previous one).
+ */
+void
+http_query_force_port(http_query *q, bool force_port);
 
 /* For this particular query override on-error callback, previously
  * set by http_client_onerror()
@@ -1954,6 +2097,12 @@ trace_error (trace *t, error err);
 void
 trace_dump_body (trace *t, http_data *data);
 
+/* Dump binary data (as hex dump)
+ * Each line is prefixed with the `prefix` character
+ */
+void
+trace_hexdump (trace *t, char prefix, const void *data, size_t size);
+
 /******************** SANE_Word/SANE_String arrays ********************/
 /* Create array of SANE_Word
  */
@@ -2064,7 +2213,7 @@ sane_string_array_max_strlen(const SANE_String *a);
 static inline const SANE_Device**
 sane_device_array_new (void)
 {
-    return ptr_array_new(SANE_Device*);
+    return ptr_array_new(const SANE_Device*);
 }
 
 /* Free array of SANE_Device
@@ -2322,6 +2471,19 @@ enum {
     OPT_SCAN_BR_X,
     OPT_SCAN_BR_Y,
 
+    /* Image enhancement group */
+    OPT_GROUP_ENHANCEMENT,
+    OPT_BRIGHTNESS,
+    OPT_CONTRAST,
+    OPT_SHADOW,
+    OPT_HIGHLIGHT,
+    OPT_GAMMA,
+    OPT_NEGATIVE,
+
+    /* Read-only options for ADF justification */
+    OPT_JUSTIFICATION_X,
+    OPT_JUSTIFICATION_Y,
+
     /* Total count of options, computed by compiler */
     NUM_OPTIONS
 };
@@ -2329,9 +2491,33 @@ enum {
 /* String constants for certain SANE options values
  * (missed from sane/sameopt.h)
  */
-#define OPTVAL_SOURCE_PLATEN      "Flatbed"
-#define OPTVAL_SOURCE_ADF_SIMPLEX "ADF"
-#define OPTVAL_SOURCE_ADF_DUPLEX  "ADF Duplex"
+#define OPTVAL_SOURCE_PLATEN        "Flatbed"
+#define OPTVAL_SOURCE_ADF_SIMPLEX   "ADF"
+#define OPTVAL_SOURCE_ADF_DUPLEX    "ADF Duplex"
+#define OPTVAL_JUSTIFICATION_LEFT   "left"
+#define OPTVAL_JUSTIFICATION_CENTER "center"
+#define OPTVAL_JUSTIFICATION_RIGHT  "right"
+#define OPTVAL_JUSTIFICATION_TOP    "top"
+#define OPTVAL_JUSTIFICATION_BOTTOM "bottom"
+
+/* Define options not included in saneopts.h */
+#define SANE_NAME_ADF_JUSTIFICATION_X  "adf-justification-x"
+#define SANE_TITLE_ADF_JUSTIFICATION_X SANE_I18N("ADF Width Justification")
+#define SANE_DESC_ADF_JUSTIFICATION_X  \
+        SANE_I18N("ADF width justification (left/right/center)")
+
+#define SANE_NAME_ADF_JUSTIFICATION_Y  "adf-justification-y"
+#define SANE_TITLE_ADF_JUSTIFICATION_Y SANE_I18N("ADF Height Justification")
+#define SANE_DESC_ADF_JUSTIFICATION_Y  \
+        SANE_I18N("ADF height justification (top/bottom/center)")
+
+/* Check if option belongs to image enhancement group
+ */
+static inline bool
+opt_is_enhancement (int opt)
+{
+    return OPT_BRIGHTNESS <= opt && opt <= OPT_NEGATIVE;
+}
 
 /******************** Device Capabilities ********************/
 /* Source flags
@@ -2433,6 +2619,11 @@ typedef struct {
 
     /* Sources */
     devcaps_source *src[NUM_ID_SOURCE];  /* Missed sources are NULL */
+
+    /* ADF Justification */
+    ID_JUSTIFICATION justification_x;   /* Width justification*/
+    ID_JUSTIFICATION justification_y;   /* Height justification*/
+
 } devcaps;
 
 /* Initialize Device Capabilities
@@ -2470,6 +2661,13 @@ typedef struct {
     SANE_Parameters        params;            /* Scan parameters */
     SANE_String            *sane_sources;     /* Sources, in SANE format */
     SANE_String            *sane_colormodes;  /* Color modes in SANE format */
+    SANE_Fixed             brightness;        /* -100.0 ... +100.0 */
+    SANE_Fixed             contrast;          /* -100.0 ... +100.0 */
+    SANE_Fixed             shadow;            /* 0.0 ... +100.0 */
+    SANE_Fixed             highlight;         /* 0.0 ... +100.0 */
+    SANE_Fixed             gamma;             /* Small positive value */
+    bool                   negative;          /* Flip black and white */
+
 } devopt;
 
 /* Initialize device options
@@ -2706,7 +2904,7 @@ void
 wsdd_cleanup (void);
 
 /******************** Device Management ********************/
-/* Type device represents a scanner devise
+/* Type device represents a scanner device
  */
 typedef struct device device;
 
@@ -2716,9 +2914,10 @@ device*
 device_open (const char *name, SANE_Status *status);
 
 /* Close the device
+ * If log_msg is not NULL, it is written to the device log as late as possible
  */
 void
-device_close (device *dev);
+device_close (device *dev, const char *log_msg);
 
 /* Get device's logging context
  */
@@ -2778,17 +2977,62 @@ device_management_init (void);
 void
 device_management_cleanup (void);
 
+/******************** Image filters ********************/
+/* Type filter represents image filter
+ */
+typedef struct filter filter;
+struct filter {
+    filter      *next;               /* Next filter in a chain */
+    void        (*dump) (filter *f,  /* Dump filter to the log */
+        log_ctx *log);
+    void        (*free) (filter *f); /* Free the filter */
+    void        (*apply) (filter *f, /* Apply filter to the line of image */
+        uint8_t *line, size_t size);
+};
+
+/* Free chain of filters
+ */
+void
+filter_chain_free (filter *chain);
+
+/* Push translation table based filter, that handles the
+ * following options:
+ *     - brightness
+ *     - contrast
+ *     - negative
+ *
+ * Returns updated chain
+ */
+filter*
+filter_chain_push_xlat (filter *old_chain, const devopt *opt);
+
+/* Dump filter chain to the log
+ */
+void
+filter_chain_dump (filter *chain, log_ctx *log);
+
+/* Apply filter chain to the image line
+ */
+void
+filter_chain_apply (filter *chain, uint8_t *line, size_t size);
+
 /******************** Scan Protocol handling ********************/
 /* PROTO_OP represents operation
  */
 typedef enum {
     PROTO_OP_NONE,    /* No operation */
+    PROTO_OP_PRECHECK,/* Pre-scan check */
     PROTO_OP_SCAN,    /* New scan */
     PROTO_OP_LOAD,    /* Load image */
     PROTO_OP_CHECK,   /* Check device status */
     PROTO_OP_CLEANUP, /* Cleanup after scan */
     PROTO_OP_FINISH   /* Finish scanning */
 } PROTO_OP;
+
+/* Get PROTO_OP name, for logging
+ */
+const char*
+proto_op_name (PROTO_OP op);
 
 /* proto_scan_params represents scan parameters
  */
@@ -2808,6 +3052,7 @@ typedef struct {
     log_ctx              *log;            /* Logging context */
     struct proto_handler *proto;          /* Link to proto_handler */
     const devcaps        *devcaps;        /* Device capabilities */
+    PROTO_OP             op;              /* Current operation */
     http_client          *http;           /* HTTP client for sending requests */
     http_uri             *base_uri;       /* HTTP base URI for protocol */
     http_uri             *base_uri_nozone;/* base_uri without IPv6 zone */
@@ -2851,6 +3096,14 @@ struct proto_handler {
      */
     http_query*  (*devcaps_query) (const proto_ctx *ctx);
     error        (*devcaps_decode) (const proto_ctx *ctx, devcaps *caps);
+
+    /* Create pre-scan check query and decode result
+     * These callback are optional, set to NULL, if
+     * they are not implemented by the protocol
+     * handler
+     */
+    http_query*  (*precheck_query) (const proto_ctx *ctx);
+    proto_result (*precheck_decode) (const proto_ctx *ctx);
 
     /* Initiate scanning and decode result.
      * On success, scan_decode must set ctx->data.location
@@ -3070,6 +3323,20 @@ math_bound (SANE_Word x, SANE_Word min, SANE_Word max)
     }
 }
 
+/* Bound double within range
+ */
+static inline double
+math_bound_double (double x, double min, double max)
+{
+    if (x < min) {
+        return min;
+    } else if (x > max) {
+        return max;
+    } else {
+        return x;
+    }
+}
+
 /* Compute x * mul / div, taking in account rounding
  * and integer overflow
  */
@@ -3227,8 +3494,6 @@ log_panic (log_ctx *log, const char *fmt, ...);
          __builtin_unreachable();                                       \
      } while (0)
 
-#endif
-
 /******************** Initialization/Cleanup ********************/
 /* AIRSCAN_INIT_FLAGS represents airscan_init() flags
  */
@@ -3249,5 +3514,10 @@ airscan_init (AIRSCAN_INIT_FLAGS flags, const char *log_msg);
 void
 airscan_cleanup (const char *log_msg);
 
+#ifdef  __cplusplus
+};
+#endif
+
+#endif
 /* vim:ts=8:sw=4:et
  */

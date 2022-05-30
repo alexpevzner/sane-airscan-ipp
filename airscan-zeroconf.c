@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 
+#include <fnmatch.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -356,6 +357,41 @@ zeroconf_device_find_by_ident (const char *ident, ID_PROTO *proto)
     /* Check that device supports requested protocol */
     if ((device->protocols & (1 << *proto)) != 0) {
         return device;
+    }
+
+    return NULL;
+}
+
+/* Check if device is blacklisted
+ *
+ * Returns reason string, if device is blacklisted, NULL, if not
+ */
+static const char*
+zeroconf_device_is_blacklisted (zeroconf_device *device)
+{
+    conf_blacklist *ent;
+    const char     *name, *model;
+
+    if (conf.blacklist == NULL) {
+        return NULL;
+    }
+
+    name = zeroconf_device_name(device);
+    model = zeroconf_device_model(device);
+
+    for (ent = conf.blacklist; ent != NULL; ent = ent->next) {
+        if (ent->name != NULL && !fnmatch(ent->name, name, 0)) {
+            return "name";
+        }
+
+        if (ent->model != NULL && !fnmatch(ent->model, model, 0)) {
+            return "model";
+        }
+
+        if (ent->net.addr.af != AF_UNSPEC &&
+            ip_addrset_on_network(device->addrs, ent->net)) {
+            return "address";
+        }
     }
 
     return NULL;
@@ -1043,6 +1079,8 @@ zeroconf_device_list_get (void)
     for (dev_conf = conf.devices; dev_conf != NULL; dev_conf = dev_conf->next) {
         SANE_Device *info;
         const char  *proto;
+        const char  *host;
+        size_t      hostlen;
 
         if (dev_conf->uri == NULL) {
             continue;
@@ -1058,7 +1096,15 @@ zeroconf_device_list_get (void)
             dev_conf->proto);
         info->vendor = str_dup(proto);
         info->model = str_dup(dev_conf->name);
-        info->type = str_printf("%s network scanner", proto);
+
+        host = http_uri_get_host(dev_conf->uri);
+        hostlen = strlen(host);
+        if (host[0] == '[') {
+            host ++;
+            hostlen -= 2;
+        }
+
+        info->type = str_printf("ip=%.*s", (int) hostlen, host);
     }
 
     dev_count_static = dev_count;
@@ -1066,7 +1112,7 @@ zeroconf_device_list_get (void)
     for (LL_FOR_EACH(node, &zeroconf_device_list)) {
         zeroconf_device *device;
         ID_PROTO        proto;
-        const char      *name, *model;
+        const char      *name, *model, *blacklisted;
         unsigned int    protocols;
 
         device = OUTER_STRUCT(node, zeroconf_device, node_list);
@@ -1081,6 +1127,14 @@ zeroconf_device_list_get (void)
             log_debug(zeroconf_log,
                 "%s (%d): skipping, device clashes statically configured",
                 name, device->devid);
+            continue;
+        }
+
+        blacklisted = zeroconf_device_is_blacklisted(device);
+        if (blacklisted != NULL) {
+            log_debug(zeroconf_log,
+                "%s (%d): skipping, device is blacklisted by %s",
+                name, device->devid, blacklisted);
             continue;
         }
 
@@ -1106,6 +1160,7 @@ zeroconf_device_list_get (void)
             if ((protocols & (1 << proto)) != 0) {
                 SANE_Device            *info = mem_new(SANE_Device, 1);
                 const char             *proto_name = id_proto_name(proto);
+                char                   *type;
 
                 dev_list = sane_device_array_append(dev_list, info);
                 dev_count ++;
@@ -1113,7 +1168,11 @@ zeroconf_device_list_get (void)
                 info->name = zeroconf_ident_make(name, device->devid, proto);
                 info->vendor = str_dup(proto_name);
                 info->model = str_dup(conf.model_is_netname ? name : model);
-                info->type = str_printf("%s network scanner", proto_name);
+
+                //info->type = str_printf("%s network scanner", proto_name);
+                type = str_printf("ip=", proto_name);
+                type = ip_addrset_friendly_str(device->addrs, type);
+                info->type = type;
             }
         }
     }
@@ -1345,10 +1404,30 @@ zeroconf_init (void)
 
         for (dev = conf.devices; dev != NULL; dev = dev->next) {
             if (dev->uri != NULL) {
-                log_debug(zeroconf_log, "  %s = %s, %s", dev->name,
+                log_trace(zeroconf_log, "  %s = %s, %s", dev->name,
                     http_uri_str(dev->uri), id_proto_name(dev->proto));
             } else {
-                log_debug(zeroconf_log, "  %s = disable", dev->name);
+                log_trace(zeroconf_log, "  %s = disable", dev->name);
+            }
+        }
+    }
+
+    if (conf.blacklist != NULL) {
+        conf_blacklist *ent;
+
+        log_trace(zeroconf_log, "blacklist:");
+        for (ent = conf.blacklist; ent != NULL; ent = ent->next) {
+            if (ent->model != NULL) {
+                log_trace(zeroconf_log, "  model = %s", ent->model);
+            }
+
+            if (ent->name != NULL) {
+                log_trace(zeroconf_log, "  name = %s", ent->name);
+            }
+
+            if (ent->net.addr.af != AF_UNSPEC) {
+                ip_straddr straddr = ip_network_to_straddr(ent->net);
+                log_trace(zeroconf_log, "  ip = %s", straddr.text);
             }
         }
     }

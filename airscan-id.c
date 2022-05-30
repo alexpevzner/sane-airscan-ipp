@@ -105,7 +105,7 @@ id_source_sane_name (ID_SOURCE id)
 ID_SOURCE
 id_source_by_sane_name (const char *name)
 {
-    return id_by_name(name, strcmp, id_source_sane_name_table);
+    return id_by_name(name, strcasecmp, id_source_sane_name_table);
 }
 
 /******************** ID_COLORMODE ********************/
@@ -134,7 +134,7 @@ id_colormode_sane_name (ID_COLORMODE id)
 ID_COLORMODE
 id_colormode_by_sane_name (const char *name)
 {
-    return id_by_name(name, strcmp, id_colormode_sane_name_table);
+    return id_by_name(name, strcasecmp, id_colormode_sane_name_table);
 }
 
 /******************** ID_FORMAT ********************/
@@ -176,6 +176,51 @@ id_format_short_name (ID_FORMAT id)
     const char *name = mime ? (strchr(mime, '/') + 1) : NULL;
 
     return name ? name : mime;
+}
+
+
+/******************** ID_JUSTIFICATION ********************/
+/* id_justification_sane_name_table represents ID_JUSTIFICATION to
+ * SANE name mapping
+ */
+static id_name_table id_justification_sane_name_table[] = {
+    {ID_JUSTIFICATION_LEFT,     OPTVAL_JUSTIFICATION_LEFT},
+    {ID_JUSTIFICATION_CENTER,   OPTVAL_JUSTIFICATION_CENTER},
+    {ID_JUSTIFICATION_RIGHT,    OPTVAL_JUSTIFICATION_RIGHT},
+    {ID_JUSTIFICATION_TOP,      OPTVAL_JUSTIFICATION_TOP},
+    {ID_JUSTIFICATION_BOTTOM,   OPTVAL_JUSTIFICATION_BOTTOM},
+};
+
+/* id_justification_sane_name returns SANE name for the justification
+ * For unknown ID returns NULL
+ */
+const char*
+id_justification_sane_name (ID_JUSTIFICATION id)
+{
+    return id_name(id, id_justification_sane_name_table);
+}
+
+/******************** PROTO_OP ********************/
+/* proto_op_name_table represents PROTO_OP to its
+ * name mappind
+ */
+static id_name_table proto_op_name_table[] = {
+    {PROTO_OP_NONE,     "PROTO_OP_NONE"},
+    {PROTO_OP_PRECHECK, "PROTO_OP_PRECHECK"},
+    {PROTO_OP_SCAN,     "PROTO_OP_SCAN"},
+    {PROTO_OP_LOAD,     "PROTO_OP_LOAD"},
+    {PROTO_OP_CHECK,    "PROTO_OP_CHECK"},
+    {PROTO_OP_CLEANUP,  "PROTO_OP_CLEANUP"},
+    {PROTO_OP_FINISH,   "PROTO_OP_FINISH"},
+    {-1, NULL}
+};
+
+/* Get PROTO_OP name, for logging
+ */
+const char*
+proto_op_name (PROTO_OP op)
+{
+    return id_name(op, proto_op_name_table);
 }
 
 /* vim:ts=8:sw=4:et

@@ -138,6 +138,30 @@ eloop_poll_func (struct pollfd *ufds, unsigned int nfds, int timeout,
     rc = poll(ufds, nfds, timeout);
     pthread_mutex_lock(&eloop_mutex);
 
+    /* Avahi multithreading support is semi-broken. Though new
+     * AvahiWatch could be added from a context of any thread
+     * (Avahi internal structures are properly interlocked, and
+     * event loop thread is properly woken by poll->watch_new()),
+     * Avahi internal indices are only rebuild in the beginning
+     * of the avahi_simple_poll_iterate(), when avahi_simple_poll_prepare()
+     * is called. So when Avahi returns from the poll() syscall
+     * and calls avahi_simple_poll_dispatch(), it asserts, if new
+     * AvahiWatch, which causes process to crash.
+     *
+     * To work around this crash, we force avahi_simple_poll_iterate()
+     * to exit before calling of avahi_simple_poll_dispatch() by
+     * returning error code from here. The subsequent call of
+     * avahi_simple_poll_iterate() fixes the situation by calling
+     * avahi_simple_poll_prepare() first.
+     *
+     * The returned error code cannot be EINTR, because interrupted
+     * system call errors are ignored by Avahi (it simply restarts
+     * the operation) and needs to be distinguished by a "normal"
+     * errors, so event loop in the eloop_thread_func() will handle
+     * it in appropriate manner.
+     *
+     * For now we use EBUSY error code for this purpose
+     */
     if (eloop_poll_restart) {
         /* We have to return an error other than EINTR to restart the
            avahi loop. */
@@ -437,6 +461,21 @@ eloop_timer_cancel (eloop_timer *timer)
     mem_free(timer);
 }
 
+/* Convert ELOOP_FDPOLL_MASK to string. Used for logging.
+ */
+const char*
+eloop_fdpoll_mask_str (ELOOP_FDPOLL_MASK mask)
+{
+    switch (mask & ELOOP_FDPOLL_BOTH) {
+    case 0:                  return "{--}";
+    case ELOOP_FDPOLL_READ:  return "{r-}";
+    case ELOOP_FDPOLL_WRITE: return "{-w}";
+    case ELOOP_FDPOLL_BOTH:  return "{rw}";
+    }
+
+    return "{??}"; /* Should never happen indeed */
+}
+
 /* eloop_fdpoll notifies user when file becomes
  * readable, writable or both, depending on its
  * event mask
@@ -508,12 +547,14 @@ eloop_fdpoll_free (eloop_fdpoll *fdpoll)
     mem_free(fdpoll);
 }
 
-/* Set eloop_fdpoll event mask
+/* Set eloop_fdpoll event mask. It returns a previous value of event mask
  */
-void
+ELOOP_FDPOLL_MASK
 eloop_fdpoll_set_mask (eloop_fdpoll *fdpoll, ELOOP_FDPOLL_MASK mask)
 {
-    if (fdpoll->mask != mask) {
+    ELOOP_FDPOLL_MASK old_mask = fdpoll->mask;
+
+    if (old_mask != mask) {
         const AvahiPoll *poll = eloop_poll_get();
         AvahiWatchEvent events = 0;
 
@@ -528,6 +569,8 @@ eloop_fdpoll_set_mask (eloop_fdpoll *fdpoll, ELOOP_FDPOLL_MASK mask)
         fdpoll->mask = mask;
         poll->watch_update(fdpoll->watch, events);
     }
+
+    return old_mask;
 }
 
 /* Format error string, as printf() does and save result

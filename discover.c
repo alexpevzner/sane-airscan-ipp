@@ -70,7 +70,7 @@ main (int argc, char **argv)
         if (!strcmp(argv[i], "-d")) {
             conf.dbg_enabled = true;
         } else if (!strcmp(argv[i], "-t")) {
-            conf.dbg_trace = "./";
+            conf.dbg_trace = str_dup("./");
         } else if (!strcmp(argv[i], "-h")) {
             usage(argv);
         } else {
@@ -103,6 +103,11 @@ main (int argc, char **argv)
                 http_uri_str(endpoint->uri), id_proto_name(endpoint->proto));
         }
     }
+
+    zeroconf_device_list_free(devices);
+
+    eloop_thread_stop();
+    airscan_cleanup(NULL);
 
     return 0;
 }

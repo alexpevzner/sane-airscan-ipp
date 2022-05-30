@@ -84,6 +84,7 @@ struct http_uri {
     struct http_parser_url parsed; /* Parsed URI */
     const char             *str;   /* URI string */
     const char             *path;  /* URI path */
+    const char             *host;  /* URI host */
     HTTP_SCHEME            scheme; /* URI scheme */
     union {                 /* Host address*/
         struct sockaddr     sockaddr;
@@ -200,8 +201,6 @@ http_uri_field_equal (const http_uri *uri1, const http_uri *uri2,
     }
 }
 
-
-
 /* Replace particular URI field with val[len] string
  */
 static void
@@ -271,6 +270,8 @@ http_uri_field_replace_len (http_uri *uri, int num, const char *val, size_t len)
 
     mem_free((char*) uri->str);
     mem_free((char*) uri->path);
+    mem_free((char*) uri->host);
+
     *uri = *uri2;
     mem_free(uri2);
 }
@@ -334,6 +335,45 @@ http_uri_parse_scheme (const char *str)
     return c == ':' ? i : 0;
 }
 
+/* Return error, if UF_HOST field of URI is present and invalid
+ */
+static error
+http_uri_parse_check_host (http_uri *uri)
+{
+    http_uri_field  field = http_uri_field_get(uri, UF_HOST);
+    char            *host, *zone;
+    int             rc;
+    struct in6_addr in6;
+
+    /* If UF_HOST is present and in square brackets, it must
+     * be valid IPv6 literal. Note, http_parser_parse_url()
+     * doesn't check it
+     */
+    if (field.len == 0 || field.str == uri->str || field.str[-1] != '[') {
+        return NULL;
+    }
+
+    if (field.str[field.len] != ']') {
+        return ERROR("URI: missed ']' in IP6 address literal");
+    }
+
+    host = alloca(field.len + 1);
+    memcpy(host, field.str, field.len);
+    host[field.len] = '\0';
+
+    zone = strchr(host, '%');
+    if (zone != NULL) {
+        *zone = '\0';
+    }
+
+    rc = inet_pton(AF_INET6, host, &in6);
+    if (rc != 1) {
+        return ERROR("URI: invalid IP6 address literal");
+    }
+
+    return NULL;
+}
+
 /* Parse URI in place. The parsed URI doesn't create
  * a copy of URI string, and uses supplied string directly
  */
@@ -345,6 +385,7 @@ http_uri_parse (http_uri *uri, const char *str)
     const char *prefix = NULL;
     size_t     prefix_len = 0;
     size_t     path_skip = 0;
+    error      err;
 
     /* Note, github.com/nodejs/http-parser fails to properly
      * parse relative URLs (URLs without scheme), so prepend
@@ -374,7 +415,7 @@ http_uri_parse (http_uri *uri, const char *str)
     memset(uri, 0, sizeof(*uri));
     if (http_parser_parse_url(normalized, strlen(normalized),
             0, &uri->parsed) != 0) {
-        return ERROR("Invalid URI");
+        return ERROR("URI: parse error");
     }
 
     uri->str = str;
@@ -402,14 +443,23 @@ http_uri_parse (http_uri *uri, const char *str)
     }
 
     /* Decode scheme */
-    if (!strncasecmp(str, "http://", 7)) {
-        uri->scheme = HTTP_SCHEME_HTTP;
-    } else if (!strncasecmp(str, "https://", 8)) {
-        uri->scheme = HTTP_SCHEME_HTTPS;
-    } else if (!strncasecmp(str, "unix://", 7)) {
-        uri->scheme = HTTP_SCHEME_UNIX;
-    } else {
-        uri->scheme = HTTP_SCHEME_UNSET;
+    uri->scheme = HTTP_SCHEME_UNSET; /* For sanity */
+    if (scheme_len != 0) {
+        if (!strncasecmp(str, "http://", 7)) {
+            uri->scheme = HTTP_SCHEME_HTTP;
+        } else if (!strncasecmp(str, "https://", 8)) {
+            uri->scheme = HTTP_SCHEME_HTTPS;
+        } else if (!strncasecmp(str, "unix://", 7)) {
+            uri->scheme = HTTP_SCHEME_UNIX;
+        } else {
+            return ERROR("URI: invalid scheme");
+        }
+    }
+
+    /* Check UF_HOST */
+    err = http_uri_parse_check_host(uri);
+    if (err != NULL) {
+        return err;
     }
 
     return NULL;
@@ -522,20 +572,15 @@ http_uri_new (const char *str, bool strip_fragment)
 {
     http_uri       *uri = mem_new(http_uri, 1);
     char           *buf;
+    http_uri_field field;
 
     /* Parse URI */
     if (http_uri_parse(uri, str) != NULL) {
         goto FAIL;
     }
 
-    /* Allow only http and https schemes */
-    switch (uri->scheme) {
-    case HTTP_SCHEME_HTTP:
-    case HTTP_SCHEME_HTTPS:
-    case HTTP_SCHEME_UNIX:
-        break;
-
-    default:
+    /* Don't allow relative URLs here */
+    if (uri->scheme == HTTP_SCHEME_UNSET) {
         goto FAIL;
     }
 
@@ -549,9 +594,22 @@ http_uri_new (const char *str, bool strip_fragment)
         uri->parsed.field_data[UF_FRAGMENT].len = 0;
     }
 
-    /* Prepare addr, path */
+    /* Prepare addr, path, etc */
     http_uri_parse_addr(uri);
     uri->path = http_uri_field_strdup(uri, UF_PATH);
+
+    field = http_uri_field_get(uri, UF_HOST);
+    if (memchr(field.str, ':', field.len) != NULL) {
+        char *host = mem_resize((char*) NULL, field.len + 2, 1);
+
+        host[0] = '[';
+        memcpy(host + 1, field.str, field.len);
+        host[field.len + 1] = ']';
+        host[field.len + 2] = '\0';
+        uri->host = host;
+    } else {
+        uri->host = http_uri_field_strdup(uri, UF_HOST);
+    }
 
     return uri;
 
@@ -571,6 +629,7 @@ http_uri_clone (const http_uri *old)
     *uri = *old;
     uri->str = str_dup(uri->str);
     uri->path = str_dup(uri->path);
+    uri->host = str_dup(uri->host);
 
     return uri;
 }
@@ -787,6 +846,7 @@ http_uri_free (http_uri *uri)
     if (uri != NULL) {
         mem_free((char*) uri->str);
         mem_free((char*) uri->path);
+        mem_free((char*) uri->host);
         mem_free(uri);
     }
 }
@@ -813,6 +873,9 @@ http_uri_addr (http_uri *uri)
 }
 
 /* Get URI path
+ *
+ * Note, if URL has empty path (i.e., "http://1.2.3.4"), the
+ * empty string will be returned
  */
 const char*
 http_uri_get_path (const http_uri *uri)
@@ -826,6 +889,22 @@ void
 http_uri_set_path (http_uri *uri, const char *path)
 {
     http_uri_field_replace(uri, UF_PATH, path);
+}
+
+/* Get URI host. It returns only host name, port number is
+ * not included.
+ *
+ * IPv6 literal addresses are returned in square brackets
+ * (i.e., [fe80::217:c8ff:fe7b:6a91%4])
+ *
+ * Note, the subsequent modifications of URI, such as http_uri_fix_host(),
+ * http_uri_fix_ipv6_zone() etc, may make the returned string invalid,
+ * so if you need to keep it for a long time, better make a copy
+ */
+const char*
+http_uri_get_host (const http_uri *uri)
+{
+    return uri->host;
 }
 
 /* Fix URI host: if `match` is NULL or uri's host matches `match`,
@@ -914,6 +993,7 @@ http_uri_strip_zone_suffux (http_uri *uri)
 
     /* Update host */
     host = alloca(len + 1);
+    memcpy(host, field.str, len);
     host[len] = '\0';
 
     http_uri_field_replace(uri, UF_HOST, host);
@@ -1182,7 +1262,7 @@ http_hdr_parse (http_hdr *hdr, const char *data, size_t size, bool skip_line)
         .on_header_value     = http_hdr_on_header_value,
         .on_headers_complete = http_hdr_on_headers_complete
     };
-    http_parser parser;
+    http_parser parser = {0};
     static char prefix[] = "HTTP/1.1 200 OK\r\n";
 
     /* Skip first line, if requested */
@@ -1894,6 +1974,7 @@ struct http_query {
     http_hdr          request_header;           /* Request header */
     http_hdr          response_header;          /* Response header */
     bool              host_inserted;            /* Host: auto-inserted */
+    bool              force_port;               /* Host: always includes port */
 
     /* HTTP redirects */
     int               redirect_count;           /* Count of redirects */
@@ -1904,11 +1985,15 @@ struct http_query {
     eloop_timer       *timeout_timer;           /* Timeout timer */
     int               timeout_value;            /* In milliseconds */
 
+    /* Miscellaneous options */
+    bool              no_need_response_body;    /* Response body not needed */
+
     /* Low-level I/O */
     bool              submitted;                /* http_query_submit() called */
     uint64_t          eloop_callid;             /* For eloop_call_cancel */
     error             err;                      /* Transport error */
     struct addrinfo   *addrs;                   /* Addresses to connect to */
+    bool              addrs_freeaddrinfo;       /* Use freeaddrinfo(addrs) */
     struct addrinfo   *addr_next;               /* Next address to try */
     int               sock;                     /* HTTP socket */
     gnutls_session_t  tls;                      /* NULL if not TLS */
@@ -1922,6 +2007,7 @@ struct http_query {
 
     /* HTTP parser */
     http_parser       http_parser;              /* HTTP parser structure */
+    bool              http_headers_received;    /* HTTP headers received */
     bool              http_parser_done;         /* Message parsing done */
 
     /* Data handling */
@@ -1969,11 +2055,11 @@ http_query_reset (http_query *q)
     http_hdr_cleanup(&q->response_header);
 
     if (q->addrs != NULL) {
-        if (q->uri->scheme == HTTP_SCHEME_UNIX) {
+        if (q->addrs_freeaddrinfo) {
+            freeaddrinfo(q->addrs);
+        } else {
             mem_free(q->addrs->ai_addr);
             mem_free(q->addrs);
-        } else {
-            freeaddrinfo(q->addrs);
         }
         q->addrs = NULL;
         q->addr_next = NULL;
@@ -1986,6 +2072,7 @@ http_query_reset (http_query *q)
     str_trunc(q->rq_buf);
     q->rq_off = 0;
 
+    q->http_headers_received = false;
     q->http_parser_done = false;
 
     http_data_unref(q->response_data);
@@ -2047,6 +2134,9 @@ http_query_set_host (http_query *q)
         default:
             dport = -1;
             break;
+        }
+        if (q->force_port) {
+            dport = -1;
         }
 
         s = ip_straddr_from_sockaddr_dport(addr, dport, false);
@@ -2118,7 +2208,7 @@ http_query_new_len (http_client *client, http_uri *uri, const char *method,
     http_query_set_request_header(q, "Connection", "close");
 
     /* Save request body and set Content-Type */
-    if (body != NULL && body_len != 0) {
+    if (body != NULL) {
         q->request_data = http_data_new(NULL, body, body_len);
         if (content_type != NULL) {
             http_query_set_request_header(q, "Content-Type", content_type);
@@ -2183,6 +2273,20 @@ http_query_timeout (http_query *q, int timeout)
     }
 }
 
+/* Set 'no_need_response_body' flag
+ *
+ * This flag notifies, that http_query issued is only interested
+ * in the HTTP response headers, not body
+ *
+ * If this flag is set, after successful reception of response
+ * HTTP header, errors in fetching response body is ignored
+ */
+void
+http_query_no_need_response_body (http_query *q)
+{
+    q->no_need_response_body = true;
+}
+
 /* Cancel query timeout timer
  */
 static void
@@ -2192,6 +2296,16 @@ http_query_timeout_cancel (http_query *q)
         eloop_timer_cancel(q->timeout_timer);
         q->timeout_timer = NULL;
     }
+}
+
+/* Set forcing port to be added to the Host header for this query.
+ *
+ * This function may be called multiple times (each subsequent call overrides
+ * a previous one).
+ */
+void
+http_query_force_port(http_query *q, bool force_port) {
+    q->force_port = force_port;
 }
 
 /* For this particular query override on-error callback, previously
@@ -2313,6 +2427,29 @@ http_query_redirect (http_query *q, const char *method)
     return NULL;
 }
 
+/* Check if I/O error should be ignored for this query
+ */
+static bool
+http_query_ignore_error (http_query *q)
+{
+    int status;
+
+    /* Headers must be received */
+    if (!q->http_headers_received) {
+        return false;
+    }
+
+    /* Depending on HTTP status, response body may be irrelevant */
+    status = q->http_parser.status_code;
+    switch (status / 100) {
+        case 1: case 3: case 4: case 5:
+            return true;
+    }
+
+    /* If `no_need_response_body' is set, ignore the error */
+    return q->no_need_response_body;
+}
+
 /* Complete query processing
  */
 static void
@@ -2325,6 +2462,13 @@ http_query_complete (http_query *q, error err)
 
     /* Unlink query from a client */
     ll_del(&q->chain);
+
+    /* In some cases, I/O error can be ignored. Check for that */
+    if (err != NULL && http_query_ignore_error(q)) {
+        log_debug(client->log, "HTTP %s %s: %s (ignored)", q->method,
+                http_uri_str(q->uri), ESTRING(err));
+        err = NULL;
+    }
 
     /* Issue log messages */
     q->err = err;
@@ -2411,6 +2555,8 @@ http_query_on_headers_complete (http_parser *parser)
                 http_uri_str(q->uri),
                 http_query_status(q));
 
+        q->http_headers_received = true;
+
         if (q->onrxhdr != NULL) {
             q->onrxhdr(q->client->ptr, q);
         }
@@ -2454,6 +2600,16 @@ http_query_callbacks = {
     .on_message_complete = http_query_on_message_complete
 };
 
+/* Set http_query::fdpoll event mask
+ */
+static void
+http_query_fdpoll_set_mask (http_query *q, ELOOP_FDPOLL_MASK mask)
+{
+    ELOOP_FDPOLL_MASK old_mask = eloop_fdpoll_set_mask(q->fdpoll, mask);
+    log_debug(q->client->log, "HTTP fdpoll: %s -> %s",
+        eloop_fdpoll_mask_str(old_mask), eloop_fdpoll_mask_str(mask));
+}
+
 /* http_query::fdpoll callback
  */
 static void
@@ -2486,10 +2642,18 @@ http_query_fdpoll_callback (int fd, void *data, ELOOP_FDPOLL_MASK mask)
             return;
         }
 
+        log_debug(q->client->log, "HTTP done TLS handshake");
+
         q->handshake = false;
-        eloop_fdpoll_set_mask(q->fdpoll, ELOOP_FDPOLL_BOTH);
+        http_query_fdpoll_set_mask(q, ELOOP_FDPOLL_BOTH);
     } else if (q->sending) {
         rc = http_query_sock_send(q, q->rq_buf + q->rq_off, len);
+
+        if (rc > 0) {
+            log_debug(q->client->log, "HTTP %d bytes sent", (int) rc);
+            trace_hexdump(log_ctx_trace(q->client->log), '>',
+                q->rq_buf + q->rq_off, rc);
+        }
 
         if (rc < 0) {
             error err = http_query_sock_err(q, rc);
@@ -2517,8 +2681,10 @@ http_query_fdpoll_callback (int fd, void *data, ELOOP_FDPOLL_MASK mask)
         q->rq_off += rc;
 
         if (q->rq_off == mem_len(q->rq_buf)) {
+            log_debug(q->client->log, "HTTP done request sending");
+
             q->sending = false;
-            eloop_fdpoll_set_mask(q->fdpoll, ELOOP_FDPOLL_BOTH);
+            http_query_fdpoll_set_mask(q, ELOOP_FDPOLL_BOTH);
 
             /* Initialize HTTP parser */
             http_parser_init(&q->http_parser, HTTP_RESPONSE);
@@ -2528,6 +2694,10 @@ http_query_fdpoll_callback (int fd, void *data, ELOOP_FDPOLL_MASK mask)
         static char io_buf[HTTP_IOBUF_SIZE];
 
         rc = http_query_sock_recv(q, io_buf, sizeof(io_buf));
+        if (rc > 0) {
+            log_debug(q->client->log, "HTTP %d bytes received", (int) rc);
+            trace_hexdump(log_ctx_trace(q->client->log), '<', io_buf, rc);
+        }
 
         if (rc < 0) {
             error err = http_query_sock_err(q, rc);
@@ -2548,6 +2718,7 @@ http_query_fdpoll_callback (int fd, void *data, ELOOP_FDPOLL_MASK mask)
             }
             http_query_complete(q, err);
         } else if (q->http_parser_done) {
+            log_debug(q->client->log, "HTTP done response reception");
             http_query_complete(q, NULL);
         } else if (rc == 0) {
             error err = ERROR("connection closed by device");
@@ -2641,7 +2812,7 @@ AGAIN:
         q->handshake = true;
     }
     q->sending = true;
-    eloop_fdpoll_set_mask(q->fdpoll, ELOOP_FDPOLL_WRITE);
+    http_query_fdpoll_set_mask(q, ELOOP_FDPOLL_WRITE);
 }
 
 /* Close connection to the server, if any
@@ -2749,7 +2920,7 @@ http_query_sock_err (http_query *q, int rc)
     }
 
     if (mask != 0) {
-        eloop_fdpoll_set_mask(q->fdpoll, mask);
+        http_query_fdpoll_set_mask(q, mask);
     }
 
     return err;
@@ -2763,6 +2934,7 @@ http_query_start_processing (void *p)
     http_query      *q = (http_query*) p;
     http_uri_field  field;
     char            *host, *port;
+    const char      *path;
     struct addrinfo hints;
     int             rc;
 
@@ -2792,6 +2964,7 @@ http_query_start_processing (void *p)
         hints.ai_socktype = SOCK_STREAM;
         hints.ai_protocol = IPPROTO_TCP;
 
+        q->addrs_freeaddrinfo = true;
         rc = getaddrinfo(host, port, &hints, &q->addrs);
         if (rc != 0) {
             http_query_complete(q, ERROR(gai_strerror(rc)));
@@ -2804,6 +2977,7 @@ http_query_start_processing (void *p)
         sprintf(path, "%s/%s", conf.socket_dir, host);
 
         log_debug(q->client->log, "connecting to local socket %s", path);
+        q->addrs_freeaddrinfo = false;
         q->addrs = mem_new(struct addrinfo, 1);
         q->addrs->ai_family = AF_UNIX;
         q->addrs->ai_socktype = SOCK_STREAM;
@@ -2829,10 +3003,18 @@ http_query_start_processing (void *p)
         http_query_set_host(q);
     }
 
+    /* Obtain path. Note, URL format allows path to be empty,
+     * while HTTP request requires non-empty string
+     */
+    path = http_uri_get_path(q->uri);
+    if (*path == '\0') {
+        path = "/";
+    }
+
     /* Format HTTP request */
     str_trunc(q->rq_buf);
     q->rq_buf = str_append_printf(q->rq_buf, "%s %s HTTP/1.1\r\n",
-        q->method, http_uri_get_path(q->uri));
+        q->method, path);
 
     if (q->request_data != NULL) {
         char buf[64];

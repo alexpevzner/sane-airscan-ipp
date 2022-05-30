@@ -16,6 +16,7 @@
 /* HTTP timeouts, by operation, in milliseconds
  */
 #define DEVICE_HTTP_TIMEOUT_DEVCAPS     5000
+#define DEVICE_HTTP_TIMEOUT_PRECHECK    5000
 #define DEVICE_HTTP_TIMEOUT_SCAN        30000
 #define DEVICE_HTTP_TIMEOUT_LOAD        -1
 #define DEVICE_HTTP_TIMEOUT_CHECK       5000
@@ -113,7 +114,6 @@ struct device {
 
     /* Protocol handling */
     proto_ctx            proto_ctx;        /* Protocol handler context */
-    PROTO_OP             proto_op_current; /* Current operation */
 
     /* I/O handling (AVAHI and HTTP) */
     zeroconf_endpoint    *endpoint_current; /* Current endpoint to probe */
@@ -141,6 +141,7 @@ struct device {
     SANE_Int             read_skip_bytes;    /* How many bytes to skip at line
                                                 beginning */
     bool                 read_24_to_8;       /* Resample 24 to 8 bits */
+    filter               *read_filters;      /* Chain of image filters */
 };
 
 /* Static variables
@@ -186,6 +187,12 @@ static void
 device_stm_cancel_event_callback (void *data);
 
 static void
+device_read_filters_setup (device *dev);
+
+static void
+device_read_filters_cleanup (device *dev);
+
+static void
 device_management_start_stop (bool start);
 
 /******************** Device table management ********************/
@@ -227,7 +234,7 @@ device_new (zeroconf_devinfo *devinfo)
 /* Destroy a device
  */
 static void
-device_free (device *dev)
+device_free (device *dev, const char *log_msg)
 {
     int i;
 
@@ -268,8 +275,13 @@ device_free (device *dev)
 
     http_data_queue_free(dev->read_queue);
     pollable_free(dev->read_pollable);
+    device_read_filters_cleanup(dev);
 
     log_debug(dev->log, "device destroyed");
+    if (log_msg != NULL) {
+        log_debug(dev->log, "%s", log_msg);
+    }
+
     log_ctx_free(dev->log);
     zeroconf_devinfo_free(dev->devinfo);
     mem_free(dev);
@@ -292,7 +304,6 @@ device_io_start (device *dev)
 {
     dev->stm_cancel_event = eloop_event_new(device_stm_cancel_event_callback, dev);
     if (dev->stm_cancel_event == NULL) {
-        device_close(dev);
         return SANE_STATUS_NO_MEM;
     }
 
@@ -325,7 +336,7 @@ static void
 device_table_purge (void)
 {
     while (mem_len(device_table) > 0) {
-        device_free(device_table[0]);
+        device_free(device_table[0], NULL);
     }
 }
 
@@ -384,24 +395,6 @@ device_proto_devcaps_decode (device *dev, devcaps *caps)
     return dev->proto_ctx.proto->devcaps_decode(&dev->proto_ctx, caps);
 }
 
-/* Get operation name, for loging
- */
-static const char*
-device_proto_op_name (device *dev, PROTO_OP op)
-{
-    switch (op) {
-    case PROTO_OP_NONE:    return "PROTO_OP_NONE";
-    case PROTO_OP_SCAN:    return "PROTO_OP_SCAN";
-    case PROTO_OP_LOAD:    return "PROTO_OP_LOAD";
-    case PROTO_OP_CHECK:   return "PROTO_OP_CHECK";
-    case PROTO_OP_CLEANUP: return "PROTO_OP_CLEANUP";
-    case PROTO_OP_FINISH:  return "PROTO_OP_FINISH";
-    }
-
-    log_internal_error(dev->log);
-    return NULL;
-}
-
 /* http_query_onrxhdr() callback
  */
 static void
@@ -409,7 +402,7 @@ device_proto_op_onrxhdr (void *p, http_query *q)
 {
     device *dev = p;
 
-    if (dev->proto_op_current == PROTO_OP_LOAD && !dev->stm_cancel_sent) {
+    if (dev->proto_ctx.op == PROTO_OP_LOAD && !dev->stm_cancel_sent) {
         http_query_timeout(q, -1);
     }
 }
@@ -427,6 +420,11 @@ device_proto_op_submit (device *dev, PROTO_OP op,
     switch (op) {
     case PROTO_OP_NONE:    log_internal_error(dev->log); break;
     case PROTO_OP_FINISH:  log_internal_error(dev->log); break;
+
+    case PROTO_OP_PRECHECK:
+        func = dev->proto_ctx.proto->precheck_query;
+        timeout = DEVICE_HTTP_TIMEOUT_PRECHECK;
+        break;
 
     case PROTO_OP_SCAN:
         func = dev->proto_ctx.proto->scan_query;
@@ -452,8 +450,8 @@ device_proto_op_submit (device *dev, PROTO_OP op,
     log_assert(dev->log, func != NULL);
 
     log_debug(dev->log, "%s: submitting: attempt=%d",
-        device_proto_op_name(dev, op), dev->proto_ctx.failed_attempt);
-    dev->proto_op_current = op;
+        proto_op_name(op), dev->proto_ctx.failed_attempt);
+    dev->proto_ctx.op = op;
 
     q = func(&dev->proto_ctx);
     http_query_timeout(q, timeout);
@@ -488,6 +486,7 @@ device_proto_op_decode (device *dev, PROTO_OP op)
 
     switch (op) {
     case PROTO_OP_NONE:    log_internal_error(dev->log); break;
+    case PROTO_OP_PRECHECK:func = dev->proto_ctx.proto->precheck_decode; break;
     case PROTO_OP_SCAN:    func = dev->proto_ctx.proto->scan_decode; break;
     case PROTO_OP_LOAD:    func = dev->proto_ctx.proto->load_decode; break;
     case PROTO_OP_CHECK:   func = dev->proto_ctx.proto->status_decode; break;
@@ -497,12 +496,12 @@ device_proto_op_decode (device *dev, PROTO_OP op)
 
     log_assert(dev->log, func != NULL);
 
-    log_debug(dev->log, "%s: decoding", device_proto_op_name(dev, op));
+    log_debug(dev->log, "%s: decoding", proto_op_name(op));
     result = func(&dev->proto_ctx);
     log_debug(dev->log, "%s: decoded: status=\"%s\" next=%s delay=%d",
-        device_proto_op_name(dev, op),
+        proto_op_name(op),
         sane_strstatus(result.status),
-        device_proto_op_name(dev, result.next),
+        proto_op_name(result.next),
         result.delay);
 
     if (result.next == PROTO_OP_CHECK) {
@@ -846,7 +845,7 @@ device_stm_timer_callback (void *data)
 {
     device *dev = data;
     dev->stm_timer = NULL;
-    device_proto_op_submit(dev, dev->proto_op_current, device_stm_op_callback);
+    device_proto_op_submit(dev, dev->proto_ctx.op, device_stm_op_callback);
 }
 
 /* Operation callback
@@ -855,7 +854,7 @@ static void
 device_stm_op_callback (void *ptr, http_query *q)
 {
     device       *dev = ptr;
-    proto_result result = device_proto_op_decode(dev, dev->proto_op_current);
+    proto_result result = device_proto_op_decode(dev, dev->proto_ctx.op);
 
     (void) q;
 
@@ -864,14 +863,14 @@ device_stm_op_callback (void *ptr, http_query *q)
     }
 
     /* Save useful result, if any */
-    if (dev->proto_op_current == PROTO_OP_SCAN) {
+    if (dev->proto_ctx.op == PROTO_OP_SCAN) {
         if (result.data.location != NULL) {
             mem_free((char*) dev->proto_ctx.location); /* Just in case */
             dev->proto_ctx.location = result.data.location;
             dev->proto_ctx.failed_attempt = 0;
             pthread_cond_broadcast(&dev->stm_cond);
         }
-    } else if (dev->proto_op_current == PROTO_OP_LOAD) {
+    } else if (dev->proto_ctx.op == PROTO_OP_LOAD) {
         if (result.data.image != NULL) {
             http_data_queue_push(dev->read_queue, result.data.image);
             dev->proto_ctx.images_received ++;
@@ -890,7 +889,7 @@ device_stm_op_callback (void *ptr, http_query *q)
      */
     if (dev->stm_cancel_sent) {
         if (result.next == PROTO_OP_CLEANUP ||
-            dev->proto_op_current == PROTO_OP_CHECK) {
+            dev->proto_ctx.op == PROTO_OP_CHECK) {
             result.next = PROTO_OP_FINISH;
         }
     }
@@ -934,7 +933,7 @@ device_stm_op_callback (void *ptr, http_query *q)
         log_assert(dev->log, dev->stm_timer == NULL);
         dev->stm_timer = eloop_timer_new(result.delay,
             device_stm_timer_callback, dev);
-        dev->proto_op_current = result.next;
+        dev->proto_ctx.op = result.next;
         return;
     }
 
@@ -1094,7 +1093,11 @@ device_stm_start_scan (device *dev)
 
     /* Submit a request */
     device_stm_state_set(dev, DEVICE_STM_SCANNING);
-    device_proto_op_submit(dev, PROTO_OP_SCAN, device_stm_op_callback);
+    if (dev->proto_ctx.proto->precheck_query != NULL) {
+        device_proto_op_submit(dev, PROTO_OP_PRECHECK, device_stm_op_callback);
+    } else {
+        device_proto_op_submit(dev, PROTO_OP_SCAN, device_stm_op_callback);
+    }
 }
 
 /* Wait until device leaves the working state
@@ -1196,8 +1199,8 @@ device_open (const char *ident, SANE_Status *status)
     dev = device_new(devinfo);
     *status = device_io_start(dev);
     if (*status != SANE_STATUS_GOOD) {
-        device_free(dev);
-        dev = NULL;
+        device_free(dev, NULL);
+        return NULL;
     }
 
     /* Wait until device is initialized */
@@ -1206,18 +1209,19 @@ device_open (const char *ident, SANE_Status *status)
     }
 
     if (device_stm_state_get(dev) == DEVICE_STM_PROBING_FAILED) {
-        device_free(dev);
-        dev = NULL;
+        device_free(dev, NULL);
         *status = SANE_STATUS_IO_ERROR;
+        return NULL;
     }
 
     return dev;
 }
 
 /* Close the device
+ * If log_msg is not NULL, it is written to the device log as late as possible
  */
 void
-device_close (device *dev)
+device_close (device *dev, const char *log_msg)
 {
     /* Cancel job in progress, if any */
     if (device_stm_state_working(dev)) {
@@ -1226,7 +1230,7 @@ device_close (device *dev)
 
     /* Close the device */
     device_stm_state_set(dev, DEVICE_STM_CLOSED);
-    device_free(dev);
+    device_free(dev, log_msg);
 }
 
 /* Get option descriptor
@@ -1254,12 +1258,19 @@ device_get_option (device *dev, SANE_Int option, void *value)
 SANE_Status
 device_set_option (device *dev, SANE_Int option, void *value, SANE_Word *info)
 {
+    SANE_Status status;
+
     if ((dev->flags & DEVICE_SCANNING) != 0) {
         log_debug(dev->log, "device_set_option: already scanning");
         return SANE_STATUS_INVAL;
     }
 
-    return devopt_set_option(&dev->opt, option, value, info);
+    status = devopt_set_option(&dev->opt, option, value, info);
+    if (status == SANE_STATUS_GOOD && opt_is_enhancement(option)) {
+        device_read_filters_setup(dev);
+    }
+
+    return status;
 }
 
 /* Get current scan parameters
@@ -1491,6 +1502,25 @@ device_get_select_fd (device *dev, SANE_Int *fd)
 
 
 /******************** Read machinery ********************/
+/* Setup read_filters
+ */
+static void
+device_read_filters_setup (device *dev)
+{
+    device_read_filters_cleanup(dev);
+    dev->read_filters = filter_chain_push_xlat(NULL, &dev->opt);
+    filter_chain_dump(dev->read_filters, dev->log);
+}
+
+/* Cleanup read_filters
+ */
+static void
+device_read_filters_cleanup (device *dev)
+{
+    filter_chain_free(dev->read_filters);
+    dev->read_filters = NULL;
+}
+
 /* Pull next image from the read queue and start decoding
  */
 static SANE_Status
@@ -1719,6 +1749,9 @@ device_read_decode_line (device *dev)
         }
     }
 
+    filter_chain_apply(dev->read_filters,
+            dev->read_line_buf, dev->opt.params.bytes_per_line);
+
     dev->read_line_off = 0;
     dev->read_line_num ++;
 
@@ -1734,7 +1767,9 @@ device_read (device *dev, SANE_Byte *data, SANE_Int max_len, SANE_Int *len_out)
     SANE_Status   status = SANE_STATUS_GOOD;
     image_decoder *decoder = dev->decoders[dev->proto_ctx.params.format];
 
-    *len_out = 0; /* Must return 0, if status is not GOOD */
+    if (len_out != NULL) {
+        *len_out = 0; /* Must return 0, if status is not GOOD */
+    }
 
     log_assert(dev->log, decoder != NULL);
 
@@ -1815,6 +1850,7 @@ DONE:
     /* Scan and read finished - cleanup device */
     dev->flags &= ~(DEVICE_SCANNING | DEVICE_READING);
     image_decoder_reset(decoder);
+
     if (dev->read_image != NULL) {
         http_data_unref(dev->read_image);
         dev->read_image = NULL;

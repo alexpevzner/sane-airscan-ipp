@@ -9,8 +9,16 @@
 #include "airscan.h"
 
 #include <string.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <arpa/inet.h>
 #include <sys/un.h>
+
+#if defined(OS_HAVE_ENDIAN_H)
+#   include <endian.h>
+#elif defined(OS_HAVE_SYS_ENDIAN_H)
+#   include <sys/endian.h>
+#endif
 
 /* Format ip_straddr from IP address (struct in_addr or struct in6_addr)
  * af must be AF_INET or AF_INET6
@@ -163,10 +171,70 @@ ip_addr_to_straddr (ip_addr addr, bool withzone)
     }
 
     if (sockaddr != NULL) {
-        straddr =  ip_straddr_from_sockaddr_dport(sockaddr, 0, withzone);
+        straddr = ip_straddr_from_sockaddr_dport(sockaddr, 0, withzone);
     }
 
     return straddr;
+}
+
+/* Format ip_network into ip_straddr
+ */
+ip_straddr
+ip_network_to_straddr (ip_network net)
+{
+    ip_straddr straddr = {""};
+    size_t len;
+
+    inet_ntop(net.addr.af, &net.addr.ip, straddr.text, sizeof(straddr.text));
+    len = strlen(straddr.text);
+    sprintf(straddr.text + len, "/%d", net.mask);
+
+    return straddr;
+}
+
+/* Check if ip_network contains ip_addr
+ */
+bool
+ip_network_contains (ip_network net, ip_addr addr)
+{
+    struct in_addr a4, m4;
+    uint64_t       a6[2], m6[2];
+
+    if (net.addr.af != addr.af) {
+        return false;
+    }
+
+    switch (net.addr.af) {
+    case AF_INET:
+        a4.s_addr = net.addr.ip.v4.s_addr ^ addr.ip.v4.s_addr;
+        m4.s_addr = htonl(0xffffffff << (32 - net.mask));
+        return (a4.s_addr & m4.s_addr) == 0;
+
+    case AF_INET6:
+        /* a6 = net.addr.ip.v6 ^ addr.ip.v6 */
+        memcpy(a6, &addr.ip.v6, 16);
+        memcpy(m6, &net.addr.ip.v6, 16);
+        a6[0] ^= m6[0];
+        a6[1] ^= m6[1];
+
+        /* Compute and apply netmask */
+        memset(m6, 0, 16);
+        if (net.mask <= 64) {
+            m6[0] = htobe64(UINT64_MAX << (64 - net.mask));
+            m6[1] = 0;
+        } else {
+            m6[0] = UINT64_MAX;
+            m6[1] = htobe64(UINT64_MAX << (128 - net.mask));
+        }
+
+        a6[0] &= m6[0];
+        a6[1] &= m6[1];
+
+        /* Check result */
+        return (a6[0] | a6[1]) == 0;
+    }
+
+    return false;
 }
 
 /* ip_addr_set represents a set of IP addresses
@@ -305,6 +373,98 @@ ip_addrset_is_intersect (const ip_addrset *set, const ip_addrset *set2)
     }
 
     return false;
+}
+
+/* Check if some of addresses in the address set is on the
+ * given network
+ */
+bool
+ip_addrset_on_network (const ip_addrset *set, ip_network net)
+{
+    size_t i, len = mem_len(set->addrs);
+
+    for (i = 0; i < len; i ++) {
+        if (ip_network_contains(net, set->addrs[i])) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/* Compare two ip_addrs, for sorting in ip_addrset_friendly_str()
+ */
+static int
+ip_addrset_friendly_sort_cmp (const void *p1, const void *p2)
+{
+    const ip_addr *a1 = (const ip_addr*) p1;
+    const ip_addr *a2 = (const ip_addr*) p2;
+    bool          ll1 = ip_is_linklocal(a1->af, &a1->ip);
+    bool          ll2 = ip_is_linklocal(a2->af, &a2->ip);
+    ip_straddr    s1, s2;
+
+    /* Prefer normal addresses, rather that link-local */
+    if (ll1 != ll2) {
+        return ll1 ? 1 : -1;
+    }
+
+    /* Put IP4 addresses first, they tell more to humans */
+    if (a1->af != a2->af) {
+        return a1->af == AF_INET6 ? 1 : -1;
+    }
+
+    /* Otherwise, sort lexicographically */
+    s1 = ip_addr_to_straddr(*a1, true);
+    s2 = ip_addr_to_straddr(*a2, true);
+
+    return strcmp(s1.text, s2.text);
+}
+
+/* Create user-friendly string out of set of addresses, containing
+ * in the ip_addrset:
+ *   * addresses are sorted, IP4 addresses goes first
+ *   * link-local addresses are skipped, if there are non-link-local ones
+ */
+char*
+ip_addrset_friendly_str (const ip_addrset *set, char *s)
+{
+    size_t  i, j, len = mem_len(set->addrs);
+    ip_addr *addrs = alloca(sizeof(ip_addr) * len);
+
+    /* Gather addresses */
+    for (i = j = 0; i < len; i ++) {
+        ip_addr *addr = &set->addrs[i];
+        if (!ip_is_linklocal(addr->af, &addr->ip)) {
+            addrs[j ++] = *addr;
+        }
+    }
+
+    if (j != 0) {
+        len = j;
+    } else {
+        memcpy(addrs, set->addrs, sizeof(ip_addr) * len);
+    }
+
+    /* Sort addresses */
+    qsort(addrs, len, sizeof(ip_addr), ip_addrset_friendly_sort_cmp);
+
+    /* And now stringify */
+    for (i = 0; i < len; i ++) {
+        ip_straddr str = ip_addr_to_straddr(addrs[i], true);
+
+        if (i != 0) {
+            s = str_append(s, ", ");
+        }
+
+        if (str.text[0] != '[') {
+            s = str_append(s, str.text);
+        } else {
+            str.text[strlen(str.text) - 1] = '\0';
+            s = str_append(s, str.text + 1);
+        }
+    }
+
+    return s;
 }
 
 /* vim:ts=8:sw=4:et

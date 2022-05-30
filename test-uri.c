@@ -16,7 +16,7 @@ fail (const char *fmt, ...)
     va_start(ap, fmt);
     vprintf(fmt, ap);
     putchar('\n');
-    exit(0);
+    exit(1);
 }
 
 /* Test URI parser
@@ -81,6 +81,27 @@ test_get_path (const char *s, const char *expected)
     http_uri_free(uri);
 }
 
+/* Test http_uri_fix_end_slash
+ */
+static void
+test_fix_end_slash (const char *s)
+{
+    http_uri     *uri = http_uri_new(s, false);
+    const char   *path;
+
+    if (uri == NULL) {
+        fail("URI parse failed: %s", s);
+    }
+
+    http_uri_fix_end_slash(uri);
+    path = http_uri_get_path(uri);
+    if (!str_has_suffix(path, "/")) {
+        fail("fix_end_slash failed: %s, path=%s", s, path);
+    }
+
+    http_uri_free(uri);
+}
+
 /* Test http_uri_set_path
  */
 static void
@@ -125,6 +146,9 @@ test_relative (const char *base, const char *ref, const char *expected)
     if (strcmp(s, expected)) {
         fail("URI base=%s ref=%s: %s != %s", base, ref, s, expected);
     }
+
+    http_uri_free(uri_base);
+    http_uri_free(uri_rel);
 }
 
 /* The main function
@@ -139,11 +163,19 @@ main (void)
     test_parse("http:1.2.3.4",                  false);
     test_parse("http://1.2.3.4:8888/",          true);
     test_parse("http://1.2.3.4:8888:9999/",     false);
+    test_parse("/",                             false);
+    test_parse("",                              false);
 
     test_parse("http://[::1]/",                 true);
+    test_parse("http://[::1%255]/",             true);
     test_parse("http://[::1/",                  false);
     test_parse("http://[::1]:8888/",            true);
     test_parse("http://[::1]:8888:9999/",       false);
+    test_parse("http://[A%2525]//MM",           false);
+    test_parse("http://[A%2525]//MM/",          false);
+    test_parse("http://[1%255]/a",              false);
+
+    test_fix_end_slash("http://[::1%255]/a");
 
     test_addr("http://1.2.3.4/",                "1.2.3.4:80");
     test_addr("http://[::1]/",                  "[::1]:80");
@@ -154,6 +186,7 @@ main (void)
 
     test_get_path("http://1.2.3.4/",            "/");
     test_get_path("http://1.2.3.4/xxx",         "/xxx");
+    test_get_path("http://1.2.3.4",             "");
 
     test_set_path("/xxx",                       "http://user@host:123/xxx?q#frag");
 

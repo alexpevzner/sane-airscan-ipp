@@ -11,6 +11,24 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Static variables */
+static const SANE_Range devopt_percent_range = {
+    .min = SANE_FIX(-100.0),
+    .max = SANE_FIX(100.0),
+    .quant = SANE_FIX(1.0)
+};
+
+static const SANE_Range devopt_nonnegative_percent_range = {
+    .min = SANE_FIX(0.0),
+    .max = SANE_FIX(100.0),
+    .quant = SANE_FIX(1.0)
+};
+
+static const SANE_Range devopt_gamma_range = {
+    .min = SANE_FIX(0.1),
+    .max = SANE_FIX(4.0),
+};
+
 /* Initialize device options
  */
 void
@@ -147,10 +165,11 @@ devopt_choose_resolution (devopt *opt, SANE_Word wanted)
 static void
 devopt_rebuild_opt_desc (devopt *opt)
 {
-    SANE_Option_Descriptor *desc;
-    devcaps_source         *src = opt->caps.src[opt->src];
-    unsigned int           colormodes = devopt_available_colormodes(src);
-    int                    i;
+    SANE_Option_Descriptor  *desc;
+    devcaps_source          *src = opt->caps.src[opt->src];
+    unsigned int            colormodes = devopt_available_colormodes(src);
+    int                     i;
+    const char              *s;
 
     memset(opt->desc, 0, sizeof(opt->desc));
 
@@ -283,6 +302,111 @@ devopt_rebuild_opt_desc (devopt *opt)
     desc->unit = SANE_UNIT_MM;
     desc->constraint_type = SANE_CONSTRAINT_RANGE;
     desc->constraint.range = &src->win_y_range_mm;
+
+    /* OPT_GROUP_ENHANCEMENT */
+    desc = &opt->desc[OPT_GROUP_ENHANCEMENT];
+    desc->name = SANE_NAME_ENHANCEMENT;
+    desc->title = SANE_TITLE_ENHANCEMENT;
+    desc->desc = SANE_DESC_ENHANCEMENT;
+    desc->type = SANE_TYPE_GROUP;
+    desc->cap = 0;
+
+    /* OPT_BRIGHTNESS */
+    desc = &opt->desc[OPT_BRIGHTNESS];
+    desc->name = SANE_NAME_BRIGHTNESS;
+    desc->title = SANE_TITLE_BRIGHTNESS;
+    desc->desc = SANE_DESC_BRIGHTNESS;
+    desc->type = SANE_TYPE_FIXED;
+    desc->size = sizeof(SANE_Fixed);
+    desc->cap = SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT | SANE_CAP_EMULATED;
+    desc->unit = SANE_UNIT_PERCENT;
+    desc->constraint_type = SANE_CONSTRAINT_RANGE;
+    desc->constraint.range = &devopt_percent_range;
+
+    /* OPT_CONTRAST */
+    desc = &opt->desc[OPT_CONTRAST];
+    desc->name = SANE_NAME_CONTRAST;
+    desc->title = SANE_TITLE_CONTRAST;
+    desc->desc = SANE_DESC_CONTRAST;
+    desc->type = SANE_TYPE_FIXED;
+    desc->size = sizeof(SANE_Fixed);
+    desc->cap = SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT | SANE_CAP_EMULATED;
+    desc->unit = SANE_UNIT_PERCENT;
+    desc->constraint_type = SANE_CONSTRAINT_RANGE;
+    desc->constraint.range = &devopt_percent_range;
+
+    /* OPT_SHADOW */
+    desc = &opt->desc[OPT_SHADOW];
+    desc->name = SANE_NAME_SHADOW;
+    desc->title = SANE_TITLE_SHADOW;
+    desc->desc = SANE_DESC_SHADOW;
+    desc->type = SANE_TYPE_FIXED;
+    desc->size = sizeof(SANE_Fixed);
+    desc->cap = SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT | SANE_CAP_EMULATED;
+    desc->unit = SANE_UNIT_PERCENT;
+    desc->constraint_type = SANE_CONSTRAINT_RANGE;
+    desc->constraint.range = &devopt_nonnegative_percent_range;
+
+    /* OPT_HIGHLIGHT */
+    desc = &opt->desc[OPT_HIGHLIGHT];
+    desc->name = SANE_NAME_HIGHLIGHT;
+    desc->title = SANE_TITLE_HIGHLIGHT;
+    desc->desc = SANE_DESC_HIGHLIGHT;
+    desc->type = SANE_TYPE_FIXED;
+    desc->size = sizeof(SANE_Fixed);
+    desc->cap = SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT | SANE_CAP_EMULATED;
+    desc->unit = SANE_UNIT_PERCENT;
+    desc->constraint_type = SANE_CONSTRAINT_RANGE;
+    desc->constraint.range = &devopt_nonnegative_percent_range;
+
+    /* OPT_GAMMA */
+    desc = &opt->desc[OPT_GAMMA];
+    desc->name = SANE_NAME_ANALOG_GAMMA;
+    desc->title = SANE_TITLE_ANALOG_GAMMA;
+    desc->desc = SANE_DESC_ANALOG_GAMMA;
+    desc->type = SANE_TYPE_FIXED;
+    desc->size = sizeof(SANE_Fixed);
+    desc->cap = SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT | SANE_CAP_EMULATED;
+    desc->unit = SANE_UNIT_NONE;
+    desc->constraint_type = SANE_CONSTRAINT_RANGE;
+    desc->constraint.range = &devopt_gamma_range;
+
+    /* OPT_NEGATIVE */
+    desc = &opt->desc[OPT_NEGATIVE];
+    desc->name = SANE_NAME_NEGATIVE;
+    desc->title = SANE_TITLE_NEGATIVE;
+    desc->desc = SANE_DESC_NEGATIVE;
+    desc->type = SANE_TYPE_BOOL;
+    desc->size = sizeof(SANE_Bool);
+    desc->cap = SANE_CAP_SOFT_SELECT | SANE_CAP_SOFT_DETECT | SANE_CAP_EMULATED;
+
+    /* OPT_JUSTIFICATION_X */
+    desc = &opt->desc[OPT_JUSTIFICATION_X];
+    desc->name = SANE_NAME_ADF_JUSTIFICATION_X;
+    desc->title = SANE_TITLE_ADF_JUSTIFICATION_X;
+    desc->desc = SANE_DESC_ADF_JUSTIFICATION_X;
+    desc->type = SANE_TYPE_STRING;
+    desc->cap = SANE_CAP_SOFT_DETECT;
+    if (opt->caps.justification_x == ID_JUSTIFICATION_UNKNOWN) {
+        desc->cap |= SANE_CAP_INACTIVE;
+    }
+
+    s = id_justification_sane_name(opt->caps.justification_x);
+    desc->size = (s ? strlen(s) : 0) + 1;
+
+    /* OPT_JUSTIFICATION_Y */
+    desc = &opt->desc[OPT_JUSTIFICATION_Y];
+    desc->name = SANE_NAME_ADF_JUSTIFICATION_Y;
+    desc->title = SANE_TITLE_ADF_JUSTIFICATION_Y;
+    desc->desc = SANE_DESC_ADF_JUSTIFICATION_Y;
+    desc->type = SANE_TYPE_STRING;
+    desc->cap = SANE_CAP_SOFT_DETECT;
+    if (opt->caps.justification_y == ID_JUSTIFICATION_UNKNOWN) {
+        desc->cap |= SANE_CAP_INACTIVE;
+    }
+
+    s = id_justification_sane_name(opt->caps.justification_y);
+    desc->size = (s ? strlen(s) : 0) + 1;
 }
 
 /* Update scan parameters, according to the currently set
@@ -449,6 +573,52 @@ devopt_set_geom (devopt *opt, SANE_Int option, SANE_Fixed val, SANE_Word *info)
     return SANE_STATUS_GOOD;
 }
 
+/* Set enhancement option
+ */
+static SANE_Status
+devopt_set_enh (devopt *opt, SANE_Int option, SANE_Fixed val, SANE_Word *info)
+{
+    SANE_Fixed *out = NULL;
+    SANE_Range range = *opt->desc[option].constraint.range;
+    SANE_Fixed val_adjusted;
+
+    switch (option) {
+    case OPT_BRIGHTNESS:
+        out = &opt->brightness;
+        break;
+
+    case OPT_CONTRAST:
+        out = &opt->contrast;
+        break;
+
+    case OPT_SHADOW:
+        out = &opt->shadow;
+        range.max = opt->highlight - range.quant;
+        break;
+
+    case OPT_HIGHLIGHT:
+        out = &opt->highlight;
+        range.min = opt->shadow + range.quant;
+        break;
+
+    case OPT_GAMMA:
+        out = &opt->gamma;
+        break;
+
+    default:
+        log_internal_error(NULL);
+    }
+
+    val_adjusted = math_range_fit(&range, val);
+    if (val_adjusted != val) {
+        *info |= SANE_INFO_INEXACT;
+    }
+
+    *out = val_adjusted;
+
+    return SANE_STATUS_GOOD;
+}
+
 /* Set default option values. Before call to this function,
  * devopt.caps needs to be properly filled.
  */
@@ -468,6 +638,12 @@ devopt_set_defaults (devopt *opt)
     opt->tl_y = 0;
     opt->br_x = src->win_x_range_mm.max;
     opt->br_y = src->win_y_range_mm.max;
+
+    opt->brightness = SANE_FIX(0.0);
+    opt->contrast = SANE_FIX(0.0);
+    opt->shadow = SANE_FIX(0.0);
+    opt->highlight = SANE_FIX(100.0);
+    opt->gamma = SANE_FIX(1.0);
 
     devopt_rebuild_opt_desc(opt);
     devopt_update_params(opt);
@@ -521,6 +697,18 @@ devopt_set_option (devopt *opt, SANE_Int option, void *value, SANE_Word *info)
         status = devopt_set_geom(opt, option, *(SANE_Fixed*)value, info);
         break;
 
+    case OPT_BRIGHTNESS:
+    case OPT_CONTRAST:
+    case OPT_SHADOW:
+    case OPT_HIGHLIGHT:
+    case OPT_GAMMA:
+        status = devopt_set_enh(opt, option, *(SANE_Fixed*)value, info);
+        break;
+
+    case OPT_NEGATIVE:
+        opt->negative = *(SANE_Bool*)value != 0;
+        break;
+
     default:
         status = SANE_STATUS_INVAL;
     }
@@ -543,6 +731,7 @@ SANE_Status
 devopt_get_option (devopt *opt, SANE_Int option, void *value)
 {
     SANE_Status status = SANE_STATUS_GOOD;
+    const char  *s;
 
     switch (option) {
     case OPT_NUM_OPTIONS:
@@ -575,6 +764,40 @@ devopt_get_option (devopt *opt, SANE_Int option, void *value)
 
     case OPT_SCAN_BR_Y:
         *(SANE_Fixed*) value = opt->br_y;
+        break;
+
+    case OPT_BRIGHTNESS:
+        *(SANE_Fixed*) value = opt->brightness;
+        break;
+
+    case OPT_CONTRAST:
+        *(SANE_Fixed*) value = opt->contrast;
+        break;
+
+    case OPT_SHADOW:
+        *(SANE_Fixed*) value = opt->shadow;
+        break;
+
+    case OPT_HIGHLIGHT:
+        *(SANE_Fixed*) value = opt->highlight;
+        break;
+
+    case OPT_GAMMA:
+        *(SANE_Fixed*) value = opt->gamma;
+        break;
+
+    case OPT_NEGATIVE:
+        *(SANE_Bool*)value = opt->negative;
+        break;
+
+    case OPT_JUSTIFICATION_X:
+        s = id_justification_sane_name(opt->caps.justification_x);
+        strcpy(value, s ? s : "");
+        break;
+
+    case OPT_JUSTIFICATION_Y:
+        s = id_justification_sane_name(opt->caps.justification_y);
+        strcpy(value, s ? s : "");
         break;
 
     default:

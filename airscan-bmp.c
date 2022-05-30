@@ -11,6 +11,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(OS_HAVE_ENDIAN_H)
+#   include <endian.h>
+#elif defined(OS_HAVE_SYS_ENDIAN_H)
+#   include <sys/endian.h>
+#endif
+
 /* BITMAPFILEHEADER structure, see MSDN for details
  */
 #pragma pack (push,1)
@@ -224,7 +230,7 @@ image_decoder_bmp_read_line (image_decoder *decoder, void *buffer)
     int               i, wid = bmp->info_header.biWidth;
     uint8_t           *out = buffer;
 
-    if (bmp->next_line == labs(bmp->info_header.biHeight)) {
+    if (bmp->next_line == (unsigned int) labs(bmp->info_header.biHeight)) {
         return ERROR("BMP: end of file");
     }
 
