@@ -55,6 +55,7 @@ ipp_scan_query (const proto_ctx *ctx)
 {
     return ipp_http_post(ctx, NULL, 0);
 }
+
 /* Decode result of scan request
  */
 static proto_result
