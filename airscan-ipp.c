@@ -1,6 +1,6 @@
 /* AirScan (a.k.a. IPP) backend for SANE
 *
-*Copyright (C) 2019 and up by Rishabh Arya (rishabharya2799@gmail.com)
+* Copyright (C) 2019 and up by Rishabh Arya (rishabharya2799@gmail.com)
 * See LICENSE for license terms and conditions
 *
 * IPP protocol handler
